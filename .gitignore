@@ -168,3 +168,6 @@ dist
 
 # 로컬 문서 (가이드, 메모 등)
 docs/
+
+# macOS
+.DS_Store
