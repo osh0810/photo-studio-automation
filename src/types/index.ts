@@ -114,3 +114,56 @@ export type BackupRow = {
 } & {
 	처리상태: ProcessingStatus | "";
 };
+
+export type MessageIntent =
+	| "셀렉전달"
+	| "추가보정요청"
+	| "보정확정"
+	| "액자옵션확정"
+	| "원본수신확인"
+	| "보정본수신확인"
+	| "신규문의"
+	| "일정변경"
+	| "취소"
+	| "일반문의"
+	| "판단불가";
+
+export type Confidence = "높음" | "중간" | "낮음";
+
+export interface ClassificationResult {
+	intent: MessageIntent;
+	confidence: Confidence;
+	stage_change: {
+		from: string;
+		to: string | null;
+	};
+	field_updates: {
+		셀렉수신일?: string | null;
+		셀렉컷?: string | null;
+		추가보정요청일?: string | null;
+		추가보정내용?: string | null;
+		액자옵션?: string | null;
+		비고추가?: string | null;
+	};
+	suggested_reply: string;
+	human_review_needed: boolean;
+	review_reason?: string;
+}
+
+export interface ClassificationInput {
+	customer: {
+		고객명: string;
+		고객ID: string;
+		현재단계: CustomerStage;
+		원본발송일?: string;
+		셀렉수신일?: string;
+		보정본발송일?: string;
+		추가보정요청일?: string;
+		비고?: string;
+	} | null;
+	message: {
+		원문: string;
+		수신시각: string;
+		타입: "text" | "image" | "file" | "sticker";
+	};
+}
