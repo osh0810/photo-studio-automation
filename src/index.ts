@@ -1,3 +1,4 @@
+import { handleScheduledAlert, runDailyAlert } from "./handlers/cron";
 import { handleWebhook } from "./handlers/webhook";
 import type { RawWebhookPayload } from "./services/backup";
 
@@ -6,7 +7,10 @@ import type { RawWebhookPayload } from "./services/backup";
  *   POST /webhook/talk       → 네이버 톡톡 webhook (실 운영)
  *   GET  /health             → 헬스체크
  *   GET  /test/webhook?case= → 가짜 payload 로 handleWebhook 호출 (디버깅)
+ *   GET  /test/cron          → 일일 Cron 즉시 실행 + JSON 결과 반환 (디버깅)
  *   그 외                    → 404
+ *
+ * `scheduled` 트리거(UTC 00:00 = KST 09:00) 는 handleScheduledAlert 를 호출.
  */
 export default {
 	async fetch(request, env): Promise<Response> {
@@ -24,7 +28,18 @@ export default {
 			return runTestScenario(url, env);
 		}
 
+		if (url.pathname === "/test/cron" && request.method === "GET") {
+			const result = await runDailyAlert(env);
+			return new Response(JSON.stringify(result, null, 2), {
+				status: result.ok ? 200 : 500,
+				headers: { "content-type": "application/json; charset=utf-8" },
+			});
+		}
+
 		return new Response("Not Found", { status: 404 });
+	},
+	async scheduled(event, env, ctx): Promise<void> {
+		ctx.waitUntil(handleScheduledAlert(event, env, ctx));
 	},
 } satisfies ExportedHandler<Env>;
 

@@ -7,6 +7,7 @@
 import {
 	BACKUP_COLUMNS,
 	CUSTOMER_COLUMNS,
+	CustomerStage,
 	formatStage,
 	parseStage,
 	type BackupColumn,
@@ -329,6 +330,57 @@ export async function updateCustomerCells(
 		const range = `${CUSTOMER_SHEET}!${columnLetter(index)}${rowNumber}`;
 		await updateRange(env, range, [[cell]]);
 	}
+}
+
+/**
+ * 일일 Cron용 — 알림 대상 후보 고객 전체 조회.
+ *   - 종결(S7 액자발주) 제외
+ *   - `알림일시정지` 가 오늘(KST) 이후 날짜면 제외 (향후 스누즈 기능 자리)
+ *
+ * 현재단계가 빈 문자열인 행(아직 분류 전)은 `evaluateCustomer` 쪽에서
+ * 자연스럽게 null 처리되므로 여기선 걸러내지 않는다.
+ */
+export async function listAllActiveCustomers(
+	env: Env,
+): Promise<Array<{ rowNumber: number; data: Customer }>> {
+	const rows = await readRange(env, CUSTOMER_RANGE_ALL);
+	const todayMs = todayKstMidnightMs();
+	const out: Array<{ rowNumber: number; data: Customer }> = [];
+	for (let i = 0; i < rows.length; i++) {
+		const data = rowToCustomer(rows[i]);
+		if (data.현재단계 === CustomerStage.S7) continue;
+		if (isPausedAfter(data.알림일시정지, todayMs)) continue;
+		out.push({ rowNumber: i + 2, data });
+	}
+	return out;
+}
+
+/** KST 기준 오늘 00:00 의 epoch ms. */
+function todayKstMidnightMs(): number {
+	const shifted = new Date(Date.now() + 9 * 60 * 60 * 1000);
+	return Date.UTC(
+		shifted.getUTCFullYear(),
+		shifted.getUTCMonth(),
+		shifted.getUTCDate(),
+	);
+}
+
+/**
+ * `알림일시정지` 셀에 적힌 날짜가 오늘보다 미래인지 판정.
+ * 빈 값 / 파싱 실패는 "정지 아님" 으로 간주(보수적으로 알림 발송).
+ */
+function isPausedAfter(raw: string, todayMs: number): boolean {
+	if (!raw) return false;
+	const trimmed = raw.trim();
+	if (!trimmed) return false;
+	const m = trimmed.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
+	if (!m) return false;
+	const pausedMs = Date.UTC(
+		parseInt(m[1], 10),
+		parseInt(m[2], 10) - 1,
+		parseInt(m[3], 10),
+	);
+	return pausedMs > todayMs;
 }
 
 export async function appendBackupRow(
