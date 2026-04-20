@@ -44,6 +44,42 @@ export enum CustomerStage {
 	S7 = "S7",
 }
 
+/**
+ * 시트·Discord 에 사람이 읽을 수 있게 표시하는 라벨. 내부 로직(분류 prompt,
+ * 상태머신, retry 등)은 여전히 enum 코드 문자열(`"S1"`)만 쓴다 — 이 라벨은
+ * 출력 경계(I/O)에서만 변환해서 쓴다.
+ */
+export const STAGE_LABELS: Record<CustomerStage, string> = {
+	[CustomerStage.S0]: "S0 신규문의",
+	[CustomerStage.S1]: "S1 촬영완료",
+	[CustomerStage.S2]: "S2 원본발송",
+	[CustomerStage.S3]: "S3 셀렉수신",
+	[CustomerStage.S4]: "S4 보정발송",
+	[CustomerStage.S5A]: "S5a 추가보정요청",
+	[CustomerStage.S5B]: "S5b 추가보정없음",
+	[CustomerStage.S6]: "S6 추가보정발송",
+	[CustomerStage.S7]: "S7 액자발주",
+};
+
+export function formatStage(stage: CustomerStage): string {
+	return STAGE_LABELS[stage] ?? stage;
+}
+
+const STAGE_CODES = new Set<string>(Object.values(CustomerStage));
+
+/**
+ * `"S1"`, `"S1 촬영완료"`, `"S5a 추가보정요청"` 모두 `S1` / `S5a` 로 복원.
+ * 접두사만 떼서 enum 값과 대조하므로 한국어 라벨이 바뀌어도 읽기는 유지된다.
+ * 매칭 실패 / 미등록 코드는 `null` — 호출 측이 빈 문자열로 떨어트림.
+ */
+export function parseStage(label: string): CustomerStage | null {
+	if (!label) return null;
+	const match = label.trim().match(/^(S\d+[a-z]?)/);
+	if (!match) return null;
+	const code = match[1];
+	return STAGE_CODES.has(code) ? (code as CustomerStage) : null;
+}
+
 export type ProcessingStatus =
 	| "대기"
 	| "처리완료"

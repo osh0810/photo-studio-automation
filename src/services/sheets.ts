@@ -7,6 +7,8 @@
 import {
 	BACKUP_COLUMNS,
 	CUSTOMER_COLUMNS,
+	formatStage,
+	parseStage,
 	type BackupColumn,
 	type BackupRow,
 	type Customer,
@@ -261,7 +263,23 @@ function rowToCustomer(row: string[]): Customer {
 	for (let i = 0; i < CUSTOMER_COLUMNS.length; i++) {
 		out[CUSTOMER_COLUMNS[i]] = row[i] ?? "";
 	}
+	// 시트에는 `"S2 원본발송"` 라벨로 저장돼 있을 수 있다 — 내부 로직이 기대하는
+	// enum 코드(`"S2"`)로 되돌린다. 매칭 실패/빈 값은 `""` 로 떨어져 기존 타입
+	// `CustomerStage | ""` 과 호환.
+	const parsed = parseStage(out["현재단계"] ?? "");
+	out["현재단계"] = parsed ?? "";
 	return out as Customer;
+}
+
+/**
+ * 시트에 저장할 때 enum 코드(`"S2"`)를 라벨(`"S2 원본발송"`)로 변환.
+ * 이미 라벨 형태거나 enum 미등록 값이면 그대로 둔다 — parseStage 로 한 번
+ * 복원을 시도해보고 실패하면 원본 문자열을 유지.
+ */
+function stageCellForWrite(raw: string): string {
+	const code = parseStage(raw);
+	if (!code) return raw;
+	return formatStage(code);
 }
 
 export async function searchCustomerByTalkId(
@@ -288,7 +306,10 @@ export async function appendCustomerRow(
 		등록일시: customer.등록일시 || now,
 		최종수정일시: now,
 	};
-	const row = CUSTOMER_COLUMNS.map((col) => String(merged[col] ?? ""));
+	const row = CUSTOMER_COLUMNS.map((col) => {
+		const raw = String(merged[col] ?? "");
+		return col === "현재단계" ? stageCellForWrite(raw) : raw;
+	});
 	await appendRow(env, CUSTOMER_SHEET, row);
 }
 
@@ -303,8 +324,10 @@ export async function updateCustomerCells(
 		if (value === undefined) continue;
 		const index = CUSTOMER_COLUMNS.indexOf(col);
 		if (index < 0) throw new Error(`Unknown customer column: ${col}`);
+		const raw = String(value);
+		const cell = col === "현재단계" ? stageCellForWrite(raw) : raw;
 		const range = `${CUSTOMER_SHEET}!${columnLetter(index)}${rowNumber}`;
-		await updateRange(env, range, [[String(value)]]);
+		await updateRange(env, range, [[cell]]);
 	}
 }
 
@@ -314,4 +337,50 @@ export async function appendBackupRow(
 ): Promise<void> {
 	const row = BACKUP_COLUMNS.map((col: BackupColumn) => String(backup[col] ?? ""));
 	await appendRow(env, BACKUP_SHEET, row);
+}
+
+/**
+ * `appendBackupRow` 와 동일하지만 Sheets `values.append` 응답의
+ * `updates.updatedRange` 를 파싱해 행 번호를 돌려준다 — 이후
+ * `updateBackupStatus` 가 같은 행을 추가 호출 없이 갱신할 수 있게
+ * 만들기 위한 변형. 기존 `appendBackupRow` 는 호환 위해 그대로 둠.
+ *
+ * `updatedRange` 형식 예: `_원본백업!A5:L5` 또는 시트명에 공백/특수문자가
+ * 있을 때 `'시트 명'!A5:L5`. 마지막 `!` 이후의 셀 부분에서 첫 행 번호만
+ * 뽑는 방식이 가장 견고하다.
+ */
+export async function appendBackupRowReturnRow(
+	env: Env,
+	backup: Partial<BackupRow>,
+): Promise<{ rowNumber: number }> {
+	const row = BACKUP_COLUMNS.map((col: BackupColumn) => String(backup[col] ?? ""));
+	const url = spreadsheetUrl(
+		env,
+		`/values/${encodeRange(BACKUP_SHEET)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+	);
+	const res = await sheetsFetch(
+		env,
+		url,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ values: [row] }),
+		},
+		`appendBackupRowReturnRow(${BACKUP_SHEET})`,
+	);
+	const data = (await res.json()) as {
+		updates?: { updatedRange?: string };
+	};
+	const updatedRange = data.updates?.updatedRange ?? "";
+	const lastBang = updatedRange.lastIndexOf("!");
+	const cellPart = lastBang >= 0 ? updatedRange.slice(lastBang + 1) : updatedRange;
+	const match = cellPart.match(/^[A-Z]+(\d+)/);
+	if (!match) {
+		throw new SheetsApiError(
+			`appendBackupRowReturnRow: updatedRange 파싱 실패 (${updatedRange})`,
+			200,
+			updatedRange,
+		);
+	}
+	return { rowNumber: parseInt(match[1], 10) };
 }
