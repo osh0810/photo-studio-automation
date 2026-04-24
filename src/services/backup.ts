@@ -34,11 +34,23 @@ export class CriticalBackupError extends Error {
 	}
 }
 
-/** 네이버 톡톡 webhook 가짜 스키마 — 실제 명세는 미정이라 광범위하게 받는다. */
+/**
+ * 네이버 톡톡 파트너 webhook 실제 스키마 (send 이벤트 기준).
+ *   - `user` 는 **문자열**(톡톡 사용자 고유 ID) — 객체 아님. 이름은 페이로드에 없음.
+ *   - `messageId` 는 실제론 number 로 오지만, 상위 스키마 변동 대비 string|number 로 받는다.
+ *     시트/dedup 쪽은 전부 string 기준이라 `String()` 로 강제 변환해 흡수한다.
+ *   - `textContent.text` 가 실제 메시지 본문.
+ *   - 타입 레이블(메시지타입) 은 페이로드에 없음 — 현재는 "text" 로 고정.
+ *     이미지/파일 이벤트 shape 는 별도 샘플 확보 후 확장.
+ *   - `event` 가 `"send"` 외 값(예: `"leave"`, `"friend"`)이면 webhook 진입점에서
+ *     백업만 남기고 파이프라인은 스킵. 비-send 이벤트도 무조건 200 OK.
+ */
 export interface RawWebhookPayload {
-	user?: { id?: string; name?: string };
-	message?: { id?: string; text?: string; type?: string };
-	timestamp?: string | number;
+	event?: string;
+	user?: string;
+	messageId?: string | number;
+	textContent?: { text?: string; inputType?: string };
+	options?: Record<string, unknown>;
 	[k: string]: unknown;
 }
 
@@ -69,13 +81,15 @@ export async function backupWebhookPayload(
 ): Promise<{ rowNumber: number }> {
 	const backup: Partial<BackupRow> = {
 		수신시각: nowKstTimestamp(),
-		톡톡UserID: payload.user?.id ?? "",
-		톡톡UserName: payload.user?.name ?? "",
-		메시지타입: payload.message?.type ?? "",
-		메시지원문: payload.message?.text ?? "",
+		톡톡UserID: payload.user ?? "",
+		// 페이로드에 이름 없음. 컬럼은 유지 — 추후 Profile API 로 보강 예정.
+		톡톡UserName: "",
+		// send 이벤트만 본문 있음. 타입은 현재 "text" 고정 (이미지/파일 shape 미확인).
+		메시지타입: payload.textContent ? "text" : "",
+		메시지원문: payload.textContent?.text ?? "",
 		WebhookJSON: JSON.stringify(payload),
 		처리상태: "대기",
-		메시지ID: payload.message?.id ?? "",
+		메시지ID: String(payload.messageId ?? ""),
 	};
 
 	try {

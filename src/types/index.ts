@@ -12,6 +12,8 @@ declare global {
 			DISCORD_WEBHOOK_DAILY: string;
 			DISCORD_WEBHOOK_PROCESSED: string;
 			DISCORD_WEBHOOK_ERROR: string;
+			NAVER_TALK_TOKEN: string;
+			ADMIN_TOKEN: string;
 		}
 	}
 }
@@ -80,12 +82,21 @@ export function parseStage(label: string): CustomerStage | null {
 	return STAGE_CODES.has(code) ? (code as CustomerStage) : null;
 }
 
+/**
+ * 두 시트에서 공유되는 상태 문자열.
+ *   - `_원본백업.처리상태` — webhook 처리 단계의 상태 (대기/처리완료/실패/검토필요/수동처리완료)
+ *   - `고객목록.검토상태`  — 고객 단위 검토 상태. 액자누락 반자동 분기 시 "액자누락확인" 사용.
+ *
+ * "액자누락확인" 은 고객목록 전용 값이고 _원본백업에는 쓰이지 않는다 — 현재는 한 union 을
+ * 공유하지만 관심사가 명확히 갈라지면 둘로 쪼개는 게 맞다 (follow-up 대상).
+ */
 export type ProcessingStatus =
 	| "대기"
 	| "처리완료"
 	| "처리실패"
 	| "검토필요"
-	| "수동처리완료";
+	| "수동처리완료"
+	| "액자누락확인";
 
 /**
  * `고객목록` 시트 헤더. 배열 index가 컬럼 offset(A=0 … Y=24)이다.
@@ -151,16 +162,31 @@ export type BackupRow = {
 	처리상태: ProcessingStatus | "";
 };
 
+/**
+ * 고객 메시지 분류 intent. 9개 (2026-04-24 개정).
+ *
+ *   셀렉전달          원본 중 선택한 컷 번호 전달
+ *   재촬영요청        촬영 결과 전반 불만족 / 재촬영 요청
+ *   원본누락          원본 중 일부가 안 왔다는 알림
+ *   추가보정요청      이미 받은 보정본에 대해 추가 수정 요청 (셀렉추가/보정누락 포함)
+ *   보정확정          보정본 OK, 추가 수정 없음 확정
+ *   액자누락          액자 배송/전달 누락 신고
+ *   일반수신확인      "받았어요"/"감사합니다" 같은 단순 수신 확인
+ *   일반문의          주차/위치/준비물 등 운영 문의
+ *   판단불가          근거 부족 / 맥락 모호
+ *
+ * 설계 노트: 예전엔 신규문의/일정변경/취소/액자옵션확정/원본수신확인/보정본수신확인 을
+ * 별도 intent 로 뒀으나 실제 운영에서 구분 가치가 낮거나 인간 검토로 빠지는 게 자연스러워
+ * 일반문의 / 판단불가 로 흡수했다. human_review_needed: true 로 띄우면 된다.
+ */
 export type MessageIntent =
 	| "셀렉전달"
+	| "재촬영요청"
+	| "원본누락"
 	| "추가보정요청"
 	| "보정확정"
-	| "액자옵션확정"
-	| "원본수신확인"
-	| "보정본수신확인"
-	| "신규문의"
-	| "일정변경"
-	| "취소"
+	| "액자누락"
+	| "일반수신확인"
 	| "일반문의"
 	| "판단불가";
 
@@ -184,6 +210,66 @@ export interface ClassificationResult {
 	suggested_reply: string;
 	human_review_needed: boolean;
 	review_reason?: string;
+}
+
+// ─── _시스템로그 시트 ───────────────────────────────────────────────────
+
+/**
+ * `_시스템로그` 시트 헤더. 요구사항 명세서 §5.1 / Day0 가이드와 동일.
+ * 시각/등급/종류/내용/관련고객ID 5컬럼 고정.
+ */
+export const SYSTEM_LOG_COLUMNS = [
+	"시각",
+	"등급",
+	"종류",
+	"내용",
+	"관련고객ID",
+] as const;
+
+export type SystemLogColumn = (typeof SYSTEM_LOG_COLUMNS)[number];
+
+/**
+ * 현재 사용 중인 종류 enum. 새 종류를 추가할 때 문자열 리터럴을 늘려간다.
+ * union 으로 닫아두면 오타 방지 가능.
+ */
+export type SystemLogKind = "talk_send";
+
+export interface SystemLogEntry {
+	등급: AlertLevel;
+	종류: SystemLogKind;
+	내용: string;
+	관련고객ID?: string;
+}
+
+// ─── /admin/send-talk 요청 / 응답 ──────────────────────────────────────
+
+export type TalkSendAction =
+	| "원본발송"
+	| "보정본발송"
+	| "추가보정발송"
+	| "액자발주";
+
+export interface AdminSendTalkRequest {
+	customerId: string;
+	talkId: string;
+	message: string;
+	/** 프론트(Apps Script) 가 어떤 버튼을 눌렀는지 — 로그/알림용 메타데이터. */
+	action?: TalkSendAction | string;
+	/** 발송 성공 시 함께 업데이트할 고객목록 필드. 생략하면 시트 건드리지 않음. */
+	updates?: Partial<Customer>;
+}
+
+export interface AdminSendTalkResponse {
+	success: boolean;
+	customerId?: string;
+	action?: string;
+	updatedFields?: string[];
+	naverResponse?: unknown;
+	/** 발송은 성공했지만 시트 업데이트만 실패한 경우의 경고 메시지. */
+	warning?: string;
+	failedFields?: string[];
+	error?: string;
+	detail?: string;
 }
 
 export interface ClassificationInput {

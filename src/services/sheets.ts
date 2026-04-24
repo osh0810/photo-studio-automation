@@ -8,6 +8,7 @@ import {
 	BACKUP_COLUMNS,
 	CUSTOMER_COLUMNS,
 	CustomerStage,
+	SYSTEM_LOG_COLUMNS,
 	formatStage,
 	parseStage,
 	type BackupColumn,
@@ -15,6 +16,9 @@ import {
 	type Customer,
 	type CustomerColumn,
 	type Env,
+	type SystemLogColumn,
+	type SystemLogEntry,
+	type SystemLogKind,
 } from "../types/index";
 
 export class SheetsAuthError extends Error {
@@ -166,6 +170,10 @@ async function sheetsFetch(
 	});
 	if (!res.ok) {
 		const body = await res.text();
+		const snippet = body.length > 200 ? body.slice(0, 200) + "…" : body;
+		console.error(
+			`[sheets] ${operation} failed status=${res.status} body=${snippet}`,
+		);
 		throw new SheetsApiError(
 			`Sheets ${operation} failed (${res.status})`,
 			res.status,
@@ -240,8 +248,12 @@ export async function updateRange(
 
 const CUSTOMER_SHEET = "고객목록";
 const BACKUP_SHEET = "_원본백업";
+const SYSTEM_LOG_SHEET = "_시스템로그";
 const CUSTOMER_RANGE_ALL = `${CUSTOMER_SHEET}!A2:Y`;
+const SYSTEM_LOG_RANGE_ALL = `${SYSTEM_LOG_SHEET}!A2:E`;
 const TALK_ID_INDEX = CUSTOMER_COLUMNS.indexOf("톡톡ID");
+const SYSTEM_LOG_TIME_INDEX = SYSTEM_LOG_COLUMNS.indexOf("시각");
+const SYSTEM_LOG_KIND_INDEX = SYSTEM_LOG_COLUMNS.indexOf("종류");
 
 function columnLetter(index: number): string {
 	// 현재 스키마는 25컬럼(A..Y)이라 한 글자로 충분. 26을 넘기면 다시 설계.
@@ -283,6 +295,17 @@ function stageCellForWrite(raw: string): string {
 	return formatStage(code);
 }
 
+/**
+ * `셀렉컷` 전용 write-time 변환. Sheets 의 `USER_ENTERED` 모드는 순수 숫자열을
+ * number 로 강제 변환해 선행 0 을 날려버린다 (예: "0206002127" → 206002127).
+ * `'` 접두사는 "리터럴 텍스트" 마커라 셀 표시에는 나타나지 않으면서 파싱을
+ * 차단한다. 이미 붙어 있거나 빈 문자열이면 원본 유지.
+ */
+function selectCellForWrite(raw: string): string {
+	if (!raw) return raw;
+	return raw.startsWith("'") ? raw : `'${raw}`;
+}
+
 export async function searchCustomerByTalkId(
 	env: Env,
 	talkId: string,
@@ -309,7 +332,9 @@ export async function appendCustomerRow(
 	};
 	const row = CUSTOMER_COLUMNS.map((col) => {
 		const raw = String(merged[col] ?? "");
-		return col === "현재단계" ? stageCellForWrite(raw) : raw;
+		if (col === "현재단계") return stageCellForWrite(raw);
+		if (col === "셀렉컷") return selectCellForWrite(raw);
+		return raw;
 	});
 	await appendRow(env, CUSTOMER_SHEET, row);
 }
@@ -320,16 +345,28 @@ export async function updateCustomerCells(
 	updates: Partial<Customer>,
 ): Promise<void> {
 	const patched: Partial<Customer> = { ...updates, 최종수정일시: nowKstTimestamp() };
+	const cols = Object.keys(patched).filter(
+		(c) => patched[c as CustomerColumn] !== undefined,
+	);
+	console.log(
+		`[sheets] updateCustomerCells 시작 row=${rowNumber} cols=[${cols.join(",")}]`,
+	);
 	for (const col of Object.keys(patched) as CustomerColumn[]) {
 		const value = patched[col];
 		if (value === undefined) continue;
 		const index = CUSTOMER_COLUMNS.indexOf(col);
 		if (index < 0) throw new Error(`Unknown customer column: ${col}`);
 		const raw = String(value);
-		const cell = col === "현재단계" ? stageCellForWrite(raw) : raw;
+		const cell =
+			col === "현재단계"
+				? stageCellForWrite(raw)
+				: col === "셀렉컷"
+					? selectCellForWrite(raw)
+					: raw;
 		const range = `${CUSTOMER_SHEET}!${columnLetter(index)}${rowNumber}`;
 		await updateRange(env, range, [[cell]]);
 	}
+	console.log(`[sheets] updateCustomerCells 완료 row=${rowNumber}`);
 }
 
 /**
@@ -435,4 +472,54 @@ export async function appendBackupRowReturnRow(
 		);
 	}
 	return { rowNumber: parseInt(match[1], 10) };
+}
+
+// ─── _시스템로그 helpers ────────────────────────────────────────────────
+
+/** `YYYY-MM-DD` (KST 기준 오늘). 시스템로그 `시각` 컬럼 prefix 비교용. */
+function todayKstDateString(): string {
+	const shifted = new Date(Date.now() + 9 * 60 * 60 * 1000);
+	const pad = (n: number) => String(n).padStart(2, "0");
+	return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`;
+}
+
+/**
+ * `_시스템로그` 시트에 한 행 추가. `시각` 은 호출 시점 KST 로 내부에서 채운다 —
+ * 호출자가 타임스탬프를 몰라도 되게 하는 편의성이 목적.
+ */
+export async function appendSystemLog(
+	env: Env,
+	entry: SystemLogEntry,
+): Promise<void> {
+	const record: Record<SystemLogColumn, string> = {
+		시각: nowKstTimestamp(),
+		등급: entry.등급,
+		종류: entry.종류,
+		내용: entry.내용,
+		관련고객ID: entry.관련고객ID ?? "",
+	};
+	const row = SYSTEM_LOG_COLUMNS.map((col) => record[col]);
+	await appendRow(env, SYSTEM_LOG_SHEET, row);
+}
+
+/**
+ * 오늘(KST) 의 특정 `종류` 로그 개수를 센다. /admin/send-talk 의 발송 한도
+ * (하루 N건) 체크용. 실패 로그도 포함해서 세는 게 의도 — 무한 재시도 루프로
+ * 과금 폭주를 막는 게 우선이기 때문.
+ *
+ * 시트의 `시각` 컬럼은 `"YYYY-MM-DD HH:mm:ss"` 포맷이므로 접두 10자 비교로 충분.
+ */
+export async function countTodaySystemLogEntries(
+	env: Env,
+	kind: SystemLogKind,
+): Promise<number> {
+	const rows = await readRange(env, SYSTEM_LOG_RANGE_ALL);
+	const today = todayKstDateString();
+	let count = 0;
+	for (const row of rows) {
+		const 시각 = row[SYSTEM_LOG_TIME_INDEX] ?? "";
+		const 종류 = row[SYSTEM_LOG_KIND_INDEX] ?? "";
+		if (종류 === kind && 시각.startsWith(today)) count++;
+	}
+	return count;
 }

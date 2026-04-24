@@ -169,5 +169,8 @@ dist
 # 로컬 문서 (가이드, 메모 등)
 docs/
 
+# 고객 PII 포함 마이그레이션 데이터 — 로컬 전용
+migration/
+
 # macOS
 .DS_Store

@@ -142,7 +142,91 @@ npx wrangler tail
 | `DISCORD_WEBHOOK_DAILY` | 일일점검 채널 webhook URL |
 | `DISCORD_WEBHOOK_PROCESSED` | 처리내역 채널 webhook URL |
 | `DISCORD_WEBHOOK_ERROR` | 긴급에러 채널 webhook URL |
-| `NAVER_TALK_AUTH_TOKEN` | 네이버 톡톡 보내기 API 토큰 (자동 답신용) |
+| `NAVER_TALK_TOKEN` | 네이버 톡톡 보내기 API 토큰 (자동 답신용) |
+| `ADMIN_TOKEN` | `/admin/send-talk` 호출자(Apps Script) 인증 토큰 |
+
+## 🔌 엔드포인트
+
+| 메서드 | 경로 | 용도 |
+|---|---|---|
+| POST | `/webhook/talk` | 네이버 톡톡 webhook 수신 (실 운영) |
+| POST | `/admin/send-talk` | Apps Script 대시보드용 톡톡 자동 발송 |
+| GET  | `/health` | 헬스체크 |
+| GET  | `/test/webhook?case=N` | 가짜 payload 로 webhook 핸들러 실행 (디버깅) |
+| GET  | `/test/cron` | 일일 cron 로직 즉시 실행 (디버깅) |
+
+### `POST /admin/send-talk`
+
+사장님이 Google Sheets 상의 버튼(Apps Script)에서 "원본발송" 등을 누르면 호출되는 관리자 API. 네이버 톡톡 메시지 발송 + 고객목록 시트 업데이트를 한 번에 처리한다.
+
+- **인증**: HTTP `Authorization` 헤더 값이 `ADMIN_TOKEN` 과 일치해야 함 (Bearer 접두사 없이 토큰 원문).
+- **하루 발송 한도**: 100건 (`_시스템로그` 시트에서 당일 `talk_send` 로그 개수 기준, **실패 포함** 집계 — 무한 루프 차단 우선).
+- **정상 발송 시 부수 효과**:
+  - `updates` 필드로 고객목록 시트의 해당 컬럼 갱신
+  - `_시스템로그` 시트에 `result=success | action=... | length=... | duration=...ms` 형태로 기록
+  - Discord `#처리내역` 채널에 알림
+
+**요청 페이로드**
+```json
+{
+  "customerId": "2026-001",
+  "talkId": "aP76n4SBpbIIgAC8ZAqM9Q",
+  "message": "안녕하세요 허희정님, ...",
+  "action": "원본발송",
+  "updates": {
+    "현재단계": "S2",
+    "원본발송일": "2026-04-24"
+  }
+}
+```
+
+**성공 응답 (HTTP 200)**
+```json
+{
+  "success": true,
+  "customerId": "2026-001",
+  "action": "원본발송",
+  "updatedFields": ["현재단계", "원본발송일"],
+  "naverResponse": { "resultCode": "00" }
+}
+```
+
+**발송 성공 / 시트 업데이트 실패 시 (HTTP 200, 부분 성공)**
+```json
+{
+  "success": true,
+  "naverResponse": { "resultCode": "00" },
+  "warning": "시트 업데이트 실패: ...",
+  "failedFields": ["현재단계", "원본발송일"]
+}
+```
+이 경우 재시도하면 중복 발송이 되므로 클라이언트는 재시도하지 않고 Discord `#긴급에러` 알림을 확인해 수동 처리.
+
+**에러 응답**
+
+| HTTP | 상황 |
+|---|---|
+| 401 | `Authorization` 헤더 불일치 |
+| 400 | JSON 파싱 실패 / 필수 필드(`customerId`/`talkId`/`message`) 누락 |
+| 429 | 하루 발송 한도 초과 |
+| 502 | 네이버 톡톡 API 호출 실패 (네트워크/5xx/4xx/bodyLevel fail) |
+| 500 | 기타 내부 오류 |
+
+```json
+{ "success": false, "error": "...", "detail": "..." }
+```
+
+**로컬 테스트**
+```bash
+# 1) 로컬 워커 띄우기
+npm run dev
+
+# 2) 별도 터미널에서 스크립트 실행
+npx tsx scripts/test-send-talk.ts --dry                  # 페이로드만 출력
+npx tsx scripts/test-send-talk.ts --scenario=auth-fail   # 401 기대
+npx tsx scripts/test-send-talk.ts --scenario=missing-field # 400 기대
+npx tsx scripts/test-send-talk.ts                        # 정상 (실제 네이버 API 호출!)
+```
 
 ## 📊 데이터 구조
 

@@ -114,8 +114,12 @@ export function summarizeClassification(result: ClassificationResult): string {
 
 export type DailyAlertLevel = "긴급" | "일반" | "확인필요";
 
+/** 알림이 생성된 사유 — 정렬/그루핑용. 비고긴급은 사용자가 수동 플래그 한 것이라 우선 표시. */
+export type AlertSource = "비고긴급" | "날짜기준";
+
 export interface AlertItem {
 	level: DailyAlertLevel;
+	source: AlertSource;
 	customerName: string;
 	customerId: string;
 	stage: CustomerStage;
@@ -202,10 +206,12 @@ export function evaluateCustomer(customer: Customer, today: Date): AlertItem | n
 
 	const item = (
 		level: DailyAlertLevel,
+		source: AlertSource,
 		message: string,
 		recommendation: string,
 	): AlertItem => ({
 		level,
+		source,
 		customerName: name,
 		customerId: id,
 		stage,
@@ -213,13 +219,31 @@ export function evaluateCustomer(customer: Customer, today: Date): AlertItem | n
 		recommendation,
 	});
 
+	// 비고에 "긴급" 수동 표시 — 단계별 날짜 조건보다 우선해서 🔴 긴급 처리.
+	// listAllActiveCustomers 가 알림일시정지를 이미 필터링하지만,
+	// evaluateCustomer 단독 호출 경로(테스트 등) 대비 방어적 재확인.
+	const note = customer.비고 ?? "";
+	if (note.toLowerCase().includes("긴급")) {
+		const paused = parseSheetDate(customer.알림일시정지, today);
+		if (!paused || paused.getTime() <= today.getTime()) {
+			return item(
+				"긴급",
+				"비고긴급",
+				"비고 긴급 표시",
+				note.trim(),
+			);
+		}
+	}
+
 	switch (stage) {
 		case CustomerStage.S1: {
 			if (!촬영 || 원본) return null;
 			const days = daysBetween(촬영, today);
 			if (days < 1) return null;
+			if (days >= 30) return null;
 			return item(
 				"일반",
+				"날짜기준",
 				`원본 ${days}일 미발송 (촬영 ${formatShortDate(촬영)} → 오늘 ${todayShort})`,
 				"원본 발송 필요",
 			);
@@ -227,9 +251,11 @@ export function evaluateCustomer(customer: Customer, today: Date): AlertItem | n
 		case CustomerStage.S2: {
 			if (!원본 || 셀렉) return null;
 			const days = daysBetween(원본, today);
+			if (days >= 30) return null;
 			if (days >= 14) {
 				return item(
 					"긴급",
+					"날짜기준",
 					`셀렉 ${days}일 미수신 (원본 ${formatShortDate(원본)} → 오늘 ${todayShort})`,
 					"리마인드 메시지 추천",
 				);
@@ -237,6 +263,7 @@ export function evaluateCustomer(customer: Customer, today: Date): AlertItem | n
 			if (days >= 7) {
 				return item(
 					"일반",
+					"날짜기준",
 					`셀렉 ${days}일 미수신 (원본 ${formatShortDate(원본)} → 오늘 ${todayShort})`,
 					"리마인드 메시지 추천",
 				);
@@ -246,9 +273,11 @@ export function evaluateCustomer(customer: Customer, today: Date): AlertItem | n
 		case CustomerStage.S3: {
 			if (!셀렉 || 보정) return null;
 			const days = daysBetween(셀렉, today);
+			if (days >= 30) return null;
 			if (days >= 14) {
 				return item(
 					"긴급",
+					"날짜기준",
 					`보정본 ${days}일 지연 (셀렉 ${formatShortDate(셀렉)} → 오늘 ${todayShort})`,
 					"보정본 발송 또는 고객 안내 필요",
 				);
@@ -256,6 +285,7 @@ export function evaluateCustomer(customer: Customer, today: Date): AlertItem | n
 			if (days >= 7) {
 				return item(
 					"일반",
+					"날짜기준",
 					`보정본 ${days}일 지연 (셀렉 ${formatShortDate(셀렉)} → 오늘 ${todayShort})`,
 					"보정본 발송 또는 고객 안내 필요",
 				);
@@ -268,6 +298,7 @@ export function evaluateCustomer(customer: Customer, today: Date): AlertItem | n
 			if (days < 1) return null;
 			return item(
 				"확인필요",
+				"날짜기준",
 				`보정본 발송 ${days}일차 (${formatShortDate(보정)} → 오늘 ${todayShort})`,
 				"추가보정 여부 확인",
 			);
@@ -275,9 +306,11 @@ export function evaluateCustomer(customer: Customer, today: Date): AlertItem | n
 		case CustomerStage.S5A: {
 			if (!추가요청 || 추가발송) return null;
 			const days = daysBetween(추가요청, today);
+			if (days >= 30) return null;
 			if (days >= 14) {
 				return item(
 					"긴급",
+					"날짜기준",
 					`추가보정 ${days}일 지연 (요청 ${formatShortDate(추가요청)} → 오늘 ${todayShort})`,
 					"추가보정본 발송 필요",
 				);
@@ -285,6 +318,7 @@ export function evaluateCustomer(customer: Customer, today: Date): AlertItem | n
 			if (days >= 7) {
 				return item(
 					"일반",
+					"날짜기준",
 					`추가보정 ${days}일 지연 (요청 ${formatShortDate(추가요청)} → 오늘 ${todayShort})`,
 					"추가보정본 발송 필요",
 				);
@@ -299,8 +333,10 @@ export function evaluateCustomer(customer: Customer, today: Date): AlertItem | n
 			if (!base) return null;
 			const days = daysBetween(base, today);
 			if (days < 1) return null;
+			if (days >= 30) return null;
 			return item(
 				"일반",
+				"날짜기준",
 				`액자 발주 필요 (보정 확정 ${formatShortDate(base)})`,
 				"액자 발주 또는 옵션 확인",
 			);
@@ -309,8 +345,10 @@ export function evaluateCustomer(customer: Customer, today: Date): AlertItem | n
 			if (액자 || !추가발송) return null;
 			const days = daysBetween(추가발송, today);
 			if (days < 1) return null;
+			if (days >= 30) return null;
 			return item(
 				"일반",
+				"날짜기준",
 				`액자 발주 필요 (추가보정 발송 ${formatShortDate(추가발송)})`,
 				"액자 발주 또는 옵션 확인",
 			);
@@ -342,9 +380,17 @@ export function formatDailyReport(
 		return { title, content: "✨ 오늘은 모든 것이 정상이에요!" };
 	}
 
-	const urgent = items.filter((i) => i.level === "긴급");
-	const normal = items.filter((i) => i.level === "일반");
-	const review = items.filter((i) => i.level === "확인필요");
+	// 비고긴급(사용자 수동 플래그)을 날짜기준보다 먼저 노출. Array.sort 는
+	// ES2019 부터 안정 정렬이라 같은 source 내부 순서는 입력 그대로 유지된다.
+	const sortBySource = (xs: AlertItem[]): AlertItem[] =>
+		[...xs].sort(
+			(a, b) =>
+				(a.source === "비고긴급" ? 0 : 1) - (b.source === "비고긴급" ? 0 : 1),
+		);
+
+	const urgent = sortBySource(items.filter((i) => i.level === "긴급"));
+	const normal = sortBySource(items.filter((i) => i.level === "일반"));
+	const review = sortBySource(items.filter((i) => i.level === "확인필요"));
 
 	const lines: string[] = [];
 	const pushSection = (emoji: string, label: string, xs: AlertItem[]) => {
