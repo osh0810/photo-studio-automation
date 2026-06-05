@@ -174,3 +174,10 @@ migration/
 
 # macOS
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# 스크립트 출력물
+scripts/output/

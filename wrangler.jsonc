@@ -20,8 +20,30 @@
 	 * https://developers.cloudflare.com/workers/configuration/cron-triggers/
 	 */
 	"triggers": {
-		"crons": ["0 0 * * *"]
-	}
+		"crons": [
+            "* * * * *",
+			"0 0 * * *",
+			"*/5 * * * *",
+			"0 23 * * *"
+		]
+		// 첫 번째: Phase 3 톡톡 처리 (1분마다)
+		// 두 번째: 기존 자정 작업 (handleScheduledAlert)
+		// 세 번째: Phase 4 Step 5 메일 폴링 (5분마다, handleScheduledEmail)
+		// 네 번째: 만차안내 (UTC 23:00 = KST 08:00)
+	},
+	"vars": {
+		"NAVER_BIZ_ID": "745146",
+		"CALENDAR_ID": "vmfrmunobhhvrb1v6cg8u7j1p4@group.calendar.google.com",
+		"TIMEZONE": "Asia/Seoul"
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "studio-db",
+			"database_id": "6e5488db-f085-4864-8275-c04462c83582",
+			"migrations_dir": "src/webapp/db/migrations"
+		}
+	]
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

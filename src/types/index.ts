@@ -14,6 +14,21 @@ declare global {
 			DISCORD_WEBHOOK_ERROR: string;
 			NAVER_TALK_TOKEN: string;
 			ADMIN_TOKEN: string;
+			WEBHOOK_PATH_SECRET?: string;
+			GOOGLE_OAUTH_CLIENT_ID: string;
+			GOOGLE_OAUTH_CLIENT_SECRET: string;
+			DB: D1Database;
+			AI_CONTEXT_DAYS?: string;
+			AI_CONTEXT_MAX_MESSAGES?: string;
+			AI_DAILY_LIMIT?: string;
+			CRON_BATCH_LIMIT?: string;
+			ALLOWED_EMAIL?: string;
+			VAPID_PUBLIC_KEY?: string;
+			VAPID_PRIVATE_KEY?: string;
+			VAPID_SUBJECT?: string;
+			NAVER_BIZ_ID: string;
+			CALENDAR_ID: string;
+			TIMEZONE: string;
 		}
 	}
 }

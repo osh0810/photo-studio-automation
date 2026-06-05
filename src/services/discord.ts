@@ -23,6 +23,10 @@ export async function sendDiscordAlert(
 	title: string,
 	content: string,
 ): Promise<void> {
+	// ⭐ 디스코드 발송 비활성화 (PWA 채팅창으로 전환됨)
+	// 되돌리려면 이 return 한 줄만 제거하면 됩니다.
+	return;
+
 	const now = new Date();
 	const payload = {
 		embeds: [

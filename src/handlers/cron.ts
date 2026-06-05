@@ -147,6 +147,14 @@ export async function handleScheduledAlert(
 			`[cron] daily alert failed at ${result.failedStage}: ${result.error}`,
 		);
 	}
+
+	// Phase 7 Step 1: D1 기반 아침 점검 리포트 — 기존 시트 알림과 격리된 try/catch
+	try {
+		const { runMorningReport } = await import('../webapp/lib/morning-report');
+		await runMorningReport(env as any);
+	} catch (err) {
+		console.error('[cron] morning report failed:', err);
+	}
 }
 
 function countByLevel(items: AlertItem[]): Record<DailyAlertLevel, number> {
