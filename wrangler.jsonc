@@ -34,7 +34,8 @@
 	"vars": {
 		"NAVER_BIZ_ID": "745146",
 		"CALENDAR_ID": "vmfrmunobhhvrb1v6cg8u7j1p4@group.calendar.google.com",
-		"TIMEZONE": "Asia/Seoul"
+		"TIMEZONE": "Asia/Seoul",
+		"GOOGLE_DRIVE_PHOTOS_FOLDER_ID": "1IlKSdSHsby8fnhTS6LmdNnOnunk9GaYz"
 	},
 	"d1_databases": [
 		{
@@ -43,7 +44,8 @@
 			"database_id": "6e5488db-f085-4864-8275-c04462c83582",
 			"migrations_dir": "src/webapp/db/migrations"
 		}
-	]
+	],
+	"r2_buckets": []
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

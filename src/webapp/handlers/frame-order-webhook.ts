@@ -96,8 +96,7 @@ export async function handleFrameOrderWebhook(
     `SELECT booking_id, customer_name
      FROM bookings
      WHERE ?1 LIKE '%' || customer_name || '%'
-       AND cancelled = 0
-       AND frame_ordered_at IS NULL`,
+       AND cancelled = 0`,
   )
     .bind(customerName)
     .all<BookingRow>();

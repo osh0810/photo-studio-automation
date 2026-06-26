@@ -7,7 +7,7 @@
 
 import { getValidAccessToken } from './google-tokens';
 import { listMessages, getMessage } from './gmail-client';
-import { processEmail } from './email-processor';
+import { processEmail, retryOrphanCancels } from './email-processor';
 import { sendPushNotification } from './push-sender';
 
 interface Env {
@@ -82,6 +82,7 @@ export async function handleScheduledEmail(env: Env): Promise<void> {
 			orphan_cancel: 0,
 			error: 0,
 		};
+		const orphanCancels: Array<{ messageId: string; bookingId: string }> = [];
 
 		for (const messageId of messageIds) {
 			try {
@@ -93,6 +94,9 @@ export async function handleScheduledEmail(env: Env): Promise<void> {
 				} else {
 					results.error++;
 				}
+				if (result.result === 'orphan_cancel' && result.booking_id) {
+					orphanCancels.push({ messageId, bookingId: result.booking_id });
+				}
 				console.log(
 					`[cron-email] ${messageId}: ${result.result} (${result.booking_id || 'N/A'})`,
 				);
@@ -101,6 +105,12 @@ export async function handleScheduledEmail(env: Env): Promise<void> {
 				console.error(`[cron-email] ${messageId} 처리 실패: ${errMsg}`);
 				results.error++;
 			}
+		}
+
+		// orphan_cancel 재시도 — 배치 내 확정 메일이 먼저 도착한 취소 메일을 처리
+		if (orphanCancels.length > 0) {
+			console.log(`[cron-email] orphan_cancel 재시도: ${orphanCancels.length}건`);
+			await retryOrphanCancels(env, orphanCancels);
 		}
 
 		console.log(`[cron-email] 완료 — ${JSON.stringify(results)}`);

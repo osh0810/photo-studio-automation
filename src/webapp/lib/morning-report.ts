@@ -6,8 +6,6 @@
  *   2. 📦 액자발주대기
  *   3. 🖼️ 보정대기
  *   4. 📋 셀렉대기
- *   5. 📊 어제 처리 통계
- *   6. 🚨 즉시 확인 필요
  */
 
 import { sendPushNotification } from './push-sender';
@@ -60,28 +58,6 @@ interface SelectionWaitRow {
 	urgent_retouch_until: string | null;
 }
 
-interface UnlinkedRow {
-	booking_id: string;
-	customer_name: string;
-}
-
-interface NoCalendarRow {
-	booking_id: string;
-	customer_name: string;
-	shoot_date: string;
-}
-
-interface UnmatchedRow {
-	booking_id: string;
-	customer_name: string;
-	raw_text: string | null;
-}
-
-interface StatRow {
-	processing_result?: string;
-	processing_status?: string;
-	cnt: number;
-}
 
 function fmtHHmm(sqlite: string): string {
 	const m = sqlite.match(/\s(\d{2}):(\d{2})/);
@@ -95,11 +71,6 @@ function buildReportText(args: {
 	frameOrderWait: FrameOrderWaitRow[];
 	retouchWait: RetouchWaitRow[];
 	selectionWait: SelectionWaitRow[];
-	unlinked: UnlinkedRow[];
-	noCal: NoCalendarRow[];
-	unmatched: UnmatchedRow[];
-	emailStats: StatRow[];
-	talkStats: StatRow[];
 }): string {
 	const lines: string[] = [];
 	lines.push('📋 마음껏스튜디오 아침 점검 리포트');
@@ -160,40 +131,12 @@ function buildReportText(args: {
 	}
 	lines.push('');
 
-	// 5. 어제 처리 통계
-	lines.push('📊 어제 처리 통계');
-	const emailPairs = args.emailStats
-		.map((s) => `${s.processing_result} ${s.cnt}건`)
-		.join(' / ');
-	lines.push(`메일: ${emailPairs || '데이터 없음'}`);
-	const talkPairs = args.talkStats
-		.map((s) => `${s.processing_status} ${s.cnt}건`)
-		.join(' / ');
-	lines.push(`톡톡: ${talkPairs || '데이터 없음'}`);
-	lines.push('');
-
-	// 6. 즉시 확인 필요
-	lines.push('🚨 즉시 확인 필요');
-	const unlinkedNames = args.unlinked.map((r) => r.customer_name).join(', ');
-	const noCalNames = args.noCal.map((r) => r.customer_name).join(', ');
-	lines.push(
-		`- talk_id 미연결: ${args.unlinked.length}건${unlinkedNames ? ` (${unlinkedNames})` : ''}`,
-	);
-	lines.push(
-		`- 캘린더 미등록: ${args.noCal.length}건${noCalNames ? ` (${noCalNames})` : ''}`,
-	);
-	lines.push(`- 매칭 실패: ${args.unmatched.length}건`);
-
 	const allClear =
 		args.frameOrderWait.length === 0 &&
 		args.retouchWait.length === 0 &&
-		args.selectionWait.length === 0 &&
-		args.unlinked.length === 0 &&
-		args.noCal.length === 0 &&
-		args.unmatched.length === 0;
+		args.selectionWait.length === 0;
 
 	if (allClear) {
-		lines.push('');
 		lines.push('✅ 오늘은 모든 것이 정상입니다!');
 	}
 
@@ -331,45 +274,6 @@ export async function runMorningReport(env: Env, force = false): Promise<void> {
 		 ORDER BY (b.urgent_retouch_until IS NOT NULL) DESC, days_since DESC`,
 	).all<SelectionWaitRow>();
 
-	// F. 즉시 확인 필요
-	const unlinkedRes = await env.DB.prepare(
-		`SELECT booking_id, customer_name
-		 FROM bookings
-		 WHERE talk_id IS NULL
-		   AND cancelled = 0
-		   AND date(created_at) >= date('now', '-7 days')`,
-	).all<UnlinkedRow>();
-	const noCalRes = await env.DB.prepare(
-		`SELECT booking_id, customer_name, shoot_date
-		 FROM bookings
-		 WHERE shoot_date IS NOT NULL
-		   AND calendar_event_id IS NULL
-		   AND cancelled = 0
-		   AND date(shoot_date) >= date('now', '+9 hours')
-		 LIMIT 5`,
-	).all<NoCalendarRow>();
-	const unmatchedRes = await env.DB.prepare(
-		`SELECT bd.booking_id, b.customer_name, bd.raw_text
-		 FROM booking_details bd
-		 JOIN bookings b ON bd.booking_id = b.booking_id
-		 WHERE bd.match_status = 'unmatched'
-		 LIMIT 5`,
-	).all<UnmatchedRow>();
-
-	// G. 어제 처리 통계
-	const emailStatsRes = await env.DB.prepare(
-		`SELECT processing_result, COUNT(*) AS cnt
-		 FROM processed_emails
-		 WHERE date(processed_at) = date('now', '+9 hours', '-1 day')
-		 GROUP BY processing_result`,
-	).all<StatRow>();
-	const talkStatsRes = await env.DB.prepare(
-		`SELECT processing_status, COUNT(*) AS cnt
-		 FROM talk_messages
-		 WHERE date(received_at) = date('now', '+9 hours', '-1 day')
-		 GROUP BY processing_status`,
-	).all<StatRow>();
-
 	const todayShoots = todayShootsRes.results || [];
 	const originalWait = originalWaitRes.results || [];
 	const frameOrderWait = frameOrderWaitRes.results || [];
@@ -383,11 +287,6 @@ export async function runMorningReport(env: Env, force = false): Promise<void> {
 		frameOrderWait,
 		retouchWait,
 		selectionWait,
-		unlinked: unlinkedRes.results || [],
-		noCal: noCalRes.results || [],
-		unmatched: unmatchedRes.results || [],
-		emailStats: emailStatsRes.results || [],
-		talkStats: talkStatsRes.results || [],
 	});
 
 	// 🔴 건수: 보정대기 color_priority≤1 + 액자발주/셀렉대기 urgent 설정 항목
@@ -395,6 +294,21 @@ export async function runMorningReport(env: Env, force = false): Promise<void> {
 		retouchWait.filter((r) => r.color_priority <= 1).length +
 		frameOrderWait.filter((r) => r.urgent_retouch_until !== null).length +
 		selectionWait.filter((r) => r.urgent_retouch_until !== null).length;
+
+	const bizId = String((env as any).NAVER_BIZ_ID || '745146');
+	const bookingBase = 'https://partner.booking.naver.com/bizes/' + bizId + '/booking-list-view/bookings';
+	const seenBookingIds = new Set<string>();
+	const reportCustomers: Array<{ name: string; url: string; booking_id: string; section: string }> = [];
+	const addToReport = (name: string, id: string, section: string) => {
+		if (!id || !name || seenBookingIds.has(id)) return;
+		seenBookingIds.add(id);
+		reportCustomers.push({ name, url: bookingBase + '/' + id, booking_id: id, section });
+	};
+	todayShoots.forEach(r => addToReport(r.customer_name, r.booking_id, 'today'));
+	originalWait.forEach(r => addToReport(r.customer_name, r.booking_id, 'original'));
+	frameOrderWait.forEach(r => addToReport(r.customer_name, r.booking_id, 'frame'));
+	retouchWait.forEach(r => addToReport(r.customer_name, r.booking_id, 'retouch'));
+	selectionWait.forEach(r => addToReport(r.customer_name, r.booking_id, 'selection'));
 
 	await env.DB.prepare(
 		`INSERT INTO ai_chat_messages (sender, message, metadata, created_at)
@@ -407,6 +321,7 @@ export async function runMorningReport(env: Env, force = false): Promise<void> {
 				date: dateLabel,
 				urgent_count: urgentCount,
 				today_shoot_count: todayShoots.length,
+				customers: reportCustomers,
 			}),
 		)
 		.run();

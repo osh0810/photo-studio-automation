@@ -93,6 +93,7 @@ export function parseFolderName(folderName: string): ParsedFolderName | null {
 	if (!folderName) return null;
 	const m = folderName
 		.trim()
+		.normalize('NFC')
 		.match(/^(\d{4})(\d{2})(\d{2})\s+([가-힣A-Za-z][가-힣A-Za-z\s*]{0,20}?)님\s*([\s\S]*)$/);
 	if (!m) return null;
 
@@ -126,8 +127,10 @@ export function extractCustomerNameFromFilename(
 	filename: string,
 ): string | null {
 	if (!filename) return null;
-	const m = filename.match(/[가-힣]{2,5}/);
-	return m ? m[0] : null;
+	// NFD로 분해된 한글(ㄱ+ㅏ+ㄴ... 형태)을 NFC 완성형으로 변환 후 매칭
+	const m = filename.normalize('NFC').match(/[가-힣]{2,5}/);
+	if (!m) return null;
+	return m[0].replace(/님$/, '');
 }
 
 function normalizeName(s: string): string {

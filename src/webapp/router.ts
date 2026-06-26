@@ -21,6 +21,8 @@ import {
   handleSend,
   handleAIProcess,
   handleChatConfirm,
+  handleSkipConfirm,
+  handleGetPendingConfirmations,
 } from './handlers/chat-api';
 import { handleRulesPage, handleGetRules, handleToggleRule } from './handlers/rules';
 import { handleReportPage, handleGetReport } from './handlers/report';
@@ -30,6 +32,22 @@ import {
   handleUnsubscribe,
 } from './handlers/push-api';
 import { handleFrameOrderWebhook } from './handlers/frame-order-webhook';
+import {
+  handlePhotoUpload,
+  handlePhotoBatchMessage,
+  handlePhotoServe,
+  handlePhotoThumb,
+  handlePhotoCaption,
+  handlePhotoGroup,
+  handlePhotoUngroupOne,
+  handlePhotoGroupDissolve,
+  handlePhotoSets,
+  handlePhotoStorage,
+  handlePhotoSetDelete,
+  handlePhotoBookingLink,
+  handlePhotoDelete,
+  handlePhotoGroupAllDelete,
+} from './handlers/photo-handler';
 import { MANIFEST_JSON } from './static/manifest';
 import { SW_JS } from './static/sw';
 import { ICON_SVG } from './static/icon';
@@ -39,6 +57,7 @@ interface Env {
   DB: D1Database;
   GOOGLE_OAUTH_CLIENT_ID: string;
   GOOGLE_OAUTH_CLIENT_SECRET: string;
+  GOOGLE_DRIVE_PHOTOS_FOLDER_ID: string;
   SESSION_SECRET: string;
   ALLOWED_EMAIL: string;
   ANTHROPIC_API_KEY: string;
@@ -278,6 +297,14 @@ if (pathname === '/api/chat/confirm' && request.method === 'POST') {
     return handleChatConfirm(request, env);
 }
 
+if (pathname === '/api/chat/pending-confirmations' && request.method === 'GET') {
+    return handleGetPendingConfirmations(request, env);
+}
+
+if (pathname === '/api/chat/skip-confirm' && request.method === 'POST') {
+    return handleSkipConfirm(request, env);
+}
+
 if (pathname === '/api/chat/trigger-email' && request.method === 'GET') {
     const auth = await requireAuth(request, env);
     if (auth instanceof Response) return auth;
@@ -318,6 +345,80 @@ if (pathname === '/api/dashboard/bookings' && request.method === 'GET') {
 // 액자발주 웹훅 (인증: ADMIN_TOKEN, 인증 없음)
 if (pathname === '/webhook/frame-order' && request.method === 'POST') {
   return handleFrameOrderWebhook(request, env);
+}
+
+// ── Phase 7: 사진 API ────────────────────────────────────────────────────────
+
+if (pathname === '/api/photos/upload' && request.method === 'POST') {
+  return handlePhotoUpload(request, env);
+}
+
+if (pathname === '/api/photos/batch-message' && request.method === 'POST') {
+  return handlePhotoBatchMessage(request, env);
+}
+
+if (pathname.startsWith('/api/photos/serve/') && request.method === 'GET') {
+  const r2Key = pathname.replace('/api/photos/serve/', '');
+  return handlePhotoServe(request, env, r2Key);
+}
+
+{
+  const m = pathname.match(/^\/api\/photos\/thumb\/(\d+)$/);
+  if (m && request.method === 'GET') {
+    return handlePhotoThumb(request, env, m[1]);
+  }
+}
+
+if (pathname === '/api/photos/caption' && request.method === 'POST') {
+  return handlePhotoCaption(request, env);
+}
+
+if (pathname === '/api/photos/group' && request.method === 'POST') {
+  return handlePhotoGroup(request, env);
+}
+
+if (pathname === '/api/photos/ungroup-one' && request.method === 'POST') {
+  return handlePhotoUngroupOne(request, env);
+}
+
+{
+  const m = pathname.match(/^\/api\/photos\/group\/([^/]+)$/);
+  if (m && request.method === 'DELETE') {
+    return handlePhotoGroupDissolve(request, env, m[1]);
+  }
+}
+
+if (pathname === '/api/photos/sets' && request.method === 'GET') {
+  return handlePhotoSets(request, env);
+}
+
+if (pathname === '/api/photos/storage' && request.method === 'GET') {
+  return handlePhotoStorage(request, env);
+}
+
+{
+  const m = pathname.match(/^\/api\/photos\/booking\/([^/]+)$/);
+  if (m && request.method === 'DELETE') {
+    return handlePhotoSetDelete(request, env, m[1]);
+  }
+}
+
+if (pathname === '/api/photos/booking-link' && request.method === 'POST') {
+  return handlePhotoBookingLink(request, env);
+}
+
+{
+  const m = pathname.match(/^\/api\/photos\/photo\/(\d+)$/);
+  if (m && request.method === 'DELETE') {
+    return handlePhotoDelete(request, env, m[1]);
+  }
+}
+
+{
+  const m = pathname.match(/^\/api\/photos\/group-all\/([^/]+)$/);
+  if (m && request.method === 'DELETE') {
+    return handlePhotoGroupAllDelete(request, env, m[1]);
+  }
 }
 
   // 매칭 없음 - null 반환 → 메인 라우터가 다음 핸들러 시도

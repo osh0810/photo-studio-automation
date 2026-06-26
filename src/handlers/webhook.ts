@@ -19,34 +19,15 @@
 
 import {
 	formatErrorAlert,
-	formatNewCustomerAlert,
-	formatProcessedAlert,
-	formatReviewAlert,
-	summarizeClassification,
 } from "../lib/alerts";
 import { isDuplicate, markProcessed } from "../lib/dedup";
-import { withRetry } from "../lib/retry";
 import {
 	backupWebhookPayload,
 	CriticalBackupError,
 	updateBackupStatus,
 	type RawWebhookPayload,
 } from "../services/backup";
-import { classifyMessage } from "../services/classifier";
-import { sendDiscordAlert } from "../services/discord";
 import {
-	appendCustomerRow,
-	searchCustomerByTalkId,
-	updateCustomerCells,
-} from "../services/sheets";
-import {
-	AlertLevel,
-	CustomerStage,
-	formatStage,
-	parseStage,
-	type ClassificationInput,
-	type ClassificationResult,
-	type Customer,
 	type Env,
 } from "../types";
 import {
@@ -54,26 +35,8 @@ import {
 	notifyEchoMatchResult,
 } from "../webapp/lib/echo-matcher";
 import { handleEchoDriveLink } from "../webapp/lib/echo-drive-handler";
+import { sendPushNotification } from "../webapp/lib/push-sender";
 
-type CustomerMatch = NonNullable<
-	Awaited<ReturnType<typeof searchCustomerByTalkId>>
->;
-
-function nowKstTimestamp(): string {
-	const shifted = new Date(Date.now() + 9 * 60 * 60 * 1000);
-	const pad = (n: number) => String(n).padStart(2, "0");
-	return (
-		`${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())} ` +
-		`${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}:${pad(shifted.getUTCSeconds())}`
-	);
-}
-
-/** KST 기준 `YYYY-MM-DD`. 비고 자동 기록 태그에 사용. */
-function todayKstDate(): string {
-	const shifted = new Date(Date.now() + 9 * 60 * 60 * 1000);
-	const pad = (n: number) => String(n).padStart(2, "0");
-	return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`;
-}
 
 /**
  * payload.timestamp(ms) → SQLite datetime 형식 'YYYY-MM-DD HH:MM:SS'.
@@ -205,16 +168,35 @@ function isValidNaverPayload(payload: unknown): payload is RawWebhookPayload {
 	return true;
 }
 
-function safeSendDiscord(
+const CHAT_PUSH_TAGS = new Set(['new-customer', 'review-needed', 'frame-missing']);
+
+async function safeSendPush(
 	env: Env,
-	webhook: string,
-	level: AlertLevel,
 	title: string,
-	content: string,
+	body: string,
+	tag?: string,
 ): Promise<void> {
-	return sendDiscordAlert(webhook, level, title, content).catch((err) => {
-		console.error("Discord 전송 실패:", err);
-	});
+	if (!env.ALLOWED_EMAIL) return;
+	const plainBody = body.replace(/\*\*/g, '').replace(/`/g, '').slice(0, 150);
+	try {
+		await sendPushNotification(env as any, env.ALLOWED_EMAIL, { title, body: plainBody, tag });
+	} catch (err) {
+		console.error('[webhook] 푸시 발송 실패:', err);
+	}
+
+	if (tag && CHAT_PUSH_TAGS.has(tag) && env.DB) {
+		const fullPlain = body.replace(/\*\*/g, '').replace(/`/g, '');
+		try {
+			await (env.DB as D1Database).prepare(
+				`INSERT INTO ai_chat_messages (sender, message, metadata, created_at)
+				 VALUES ('system', ?1, ?2, datetime('now'))`,
+			)
+				.bind(`${title}\n${fullPlain}`, JSON.stringify({ type: 'push_notification', tag }))
+				.run();
+		} catch (dbErr) {
+			console.error('[webhook] 채팅 시스템 메시지 삽입 실패:', dbErr);
+		}
+	}
 }
 
 export async function handleWebhook(
@@ -226,8 +208,9 @@ export async function handleWebhook(
 	try {
 		payload = (await request.json()) as RawWebhookPayload;
 	} catch (err) {
+		console.error("[webhook] JSON 파싱 실패:", err);
 		const { title, content } = formatErrorAlert("payload 파싱", err, null);
-		await safeSendDiscord(env, env.DISCORD_WEBHOOK_ERROR, AlertLevel.ERROR, title, content);
+		await safeSendPush(env, title, content, 'webhook-parse-error');
 		return new Response("invalid json", { status: 200 });
 	}
 
@@ -243,6 +226,7 @@ export async function handleWebhook(
 
 	// 2. dedup
 	if (messageId && isDuplicate(messageId)) {
+		console.warn(`[webhook] 중복 messageId 스킵 messageId=${messageId}`);
 		return new Response("duplicate", { status: 200 });
 	}
 
@@ -282,7 +266,7 @@ export async function handleWebhook(
 		console.error("[webhook] 백업 실패 (D1은 저장됨):", err);
 		const stage = err instanceof CriticalBackupError ? "_원본백업 저장 (CRITICAL)" : "_원본백업 저장";
 		const { title, content } = formatErrorAlert(stage, err, payload);
-		await safeSendDiscord(env, env.DISCORD_WEBHOOK_ERROR, AlertLevel.CRITICAL, title, content);
+		await safeSendPush(env, title, content, 'webhook-backup-error');
 		// early return 제거 — 계속 진행
 	}
 
@@ -309,27 +293,9 @@ export async function handleWebhook(
 		return new Response("ok", { status: 200 });
 	}
 
-	// 5. 파이프라인 (고객검색 → 분류 → 분기)
-	try {
-		await processMessage(env, payload, backupRow.rowNumber);
-	} catch (err) {
-		console.error("[webhook] 처리 실패:", err);
-		const stage = err instanceof Error ? err.name || "처리 실패" : "처리 실패";
-		const { title, content } = formatErrorAlert(stage, err, payload);
-		await safeSendDiscord(
-			env,
-			env.DISCORD_WEBHOOK_ERROR,
-			AlertLevel.ERROR,
-			title,
-			`${content}\n\n**백업 행**: ${backupRow.rowNumber}`,
-		);
-		// 백업 행 상태 갱신은 베스트 에포트 — 실패해도 위 Discord 알림으로 사람이 안다.
-		await updateBackupStatus(env, backupRow.rowNumber, "처리실패", {
-			에러메시지: err instanceof Error ? err.message : String(err),
-		}).catch((updateErr) => {
-			console.error("[webhook] 백업 상태 갱신 실패:", updateErr);
-		});
-	}
+	// 5. 구 파이프라인 비활성화 — 신 배치 분석기(cron-handler)가 D1 기반으로 처리.
+	// processMessage(Sheets 조회 → 구 분류기 → Sheets 업데이트 → Discord/push)는
+	// 신 시스템과 중복 실행되어 오탐(신규 고객 오판정) 원인이 됐으므로 제거.
 
 	if (messageId) markProcessed(messageId);
 	console.log(`[webhook] 처리 완료 rowNumber=${backupRow.rowNumber}`);
@@ -397,271 +363,3 @@ async function handleEchoEvent(
 	});
 }
 
-async function processMessage(
-	env: Env,
-	payload: RawWebhookPayload,
-	rowNumber: number,
-): Promise<void> {
-	const talkId = payload.user ?? "";
-	// 페이로드에 이름 없음 — Profile API 연동 전까진 빈 문자열로 유지.
-	const talkName = "";
-	const messageText = payload.textContent?.text ?? "";
-	// 이미지/파일 이벤트 shape 확인 전까진 텍스트로 간주. classifier 도 타입보다
-	// 본문에 의존하므로 현 시점에선 충분.
-	const messageType: ClassificationInput["message"]["타입"] = "text";
-
-	if (!talkId) throw new Error("user 필드 누락 — 고객 식별 불가");
-
-	console.log(`[webhook] processMessage 시작 talkId=${talkId}`);
-
-	const existing = await withRetry(() => searchCustomerByTalkId(env, talkId));
-
-	if (!existing) {
-		console.log(`[webhook] 신규 고객 (DB 미등록) talkId=${talkId}`);
-		await handleNewCustomer(env, rowNumber, talkId, talkName, messageText);
-		return;
-	}
-	console.log(
-		`[webhook] 기존 고객 매칭 고객ID=${existing.data.고객ID} 현재단계=${existing.data.현재단계 || "-"} 시트행=${existing.rowNumber}`,
-	);
-
-	const input: ClassificationInput = {
-		customer: {
-			고객명: existing.data.고객명,
-			고객ID: existing.data.고객ID,
-			현재단계: (existing.data.현재단계 || CustomerStage.S0) as CustomerStage,
-			원본발송일: existing.data.원본발송일,
-			셀렉수신일: existing.data.셀렉수신일,
-			보정본발송일: existing.data.보정본발송일,
-			추가보정요청일: existing.data.추가보정요청일,
-			비고: existing.data.비고,
-		},
-		message: {
-			원문: messageText,
-			수신시각: nowKstTimestamp(),
-			타입: messageType,
-		},
-	};
-	const result = await withRetry(() => classifyMessage(env, input));
-	console.log(
-		`[webhook] 분류 완료 intent=${result.intent} confidence=${result.confidence} review=${result.human_review_needed} from=${result.stage_change?.from ?? "-"} to=${result.stage_change?.to ?? "-"}`,
-	);
-
-	if (result.human_review_needed) {
-		await handleReviewNeeded(env, existing, result, messageText, rowNumber);
-		return;
-	}
-
-	await handleAutoProcess(env, existing, result, rowNumber, messageText);
-}
-
-async function handleNewCustomer(
-	env: Env,
-	rowNumber: number,
-	talkId: string,
-	talkName: string,
-	messageText: string,
-): Promise<void> {
-	console.log(`[webhook] handleNewCustomer talkId=${talkId}`);
-	// 비고 컬럼은 사용자 전용 — 시스템은 쓰지 않는다. 메시지 원문은
-	// _원본백업 시트와 Discord #긴급에러 알림으로 이미 남음.
-	await withRetry(() =>
-		appendCustomerRow(env, {
-			고객명: talkName,
-			톡톡ID: talkId,
-			현재단계: CustomerStage.S0,
-			검토상태: "검토필요",
-		}),
-	);
-
-	const { title, content } = formatNewCustomerAlert(talkName, messageText);
-	await safeSendDiscord(env, env.DISCORD_WEBHOOK_ERROR, AlertLevel.WARNING, title, content);
-
-	await updateBackupStatus(env, rowNumber, "검토필요", {
-		분류결과: "신규고객",
-	});
-}
-
-async function handleReviewNeeded(
-	env: Env,
-	existing: CustomerMatch,
-	result: ClassificationResult,
-	messageText: string,
-	rowNumber: number,
-): Promise<void> {
-	console.log(
-		`[webhook] handleReviewNeeded 고객ID=${existing.data.고객ID} reason=${result.review_reason ?? "-"}`,
-	);
-	const name = existing.data.고객명 || existing.data.톡톡ID;
-	const { title, content } = formatReviewAlert(
-		name,
-		messageText,
-		result.review_reason ?? "",
-		result.suggested_reply ?? "",
-	);
-	await safeSendDiscord(env, env.DISCORD_WEBHOOK_ERROR, AlertLevel.WARNING, title, content);
-
-	await updateBackupStatus(env, rowNumber, "검토필요", {
-		매칭고객ID: existing.data.고객ID,
-		분류결과: summarizeClassification(result),
-	});
-}
-
-/**
- * 비고 컬럼은 기본적으로 사용자 전용 — Claude 의 field_updates.비고추가 는 무시한다.
- * 단, 아래 intent 는 "시스템이 추적해야 하는 사고성 이벤트" 라 예외적으로 자동 append.
- *
- *   - "원본누락": 원본 일부 누락 → S2→S1 자동 전환 + 비고 기록
- *   - "재촬영요청": 셀렉 철회/재촬영 → S3→S2 자동 전환 + 비고 기록
- *   - "액자누락": 별도 반자동 분기(`handleFrameMissing`) 에서 처리하므로 이 Map 에는 포함하지 않는다.
- *
- * Record 의 value 는 비고 라인의 태그 텍스트 (예: "원본 누락 신고").
- */
-const BIGO_AUTO_WRITE_TAGS: Record<string, string> = {
-	원본누락: "원본 누락 신고",
-	재촬영요청: "재촬영 요청",
-};
-
-async function handleAutoProcess(
-	env: Env,
-	existing: CustomerMatch,
-	result: ClassificationResult,
-	rowNumber: number,
-	messageText: string,
-): Promise<void> {
-	const currentStage = existing.data.현재단계 || "";
-
-	// 액자누락 + S7 은 반자동 분기 — 단계 변경 없이 비고/검토상태만 갱신하고
-	// Discord #긴급에러 로 즉시 알린다.
-	if (result.intent === "액자누락" && currentStage === CustomerStage.S7) {
-		await handleFrameMissing(env, existing, result, messageText, rowNumber);
-		return;
-	}
-
-	const customerUpdates: Partial<Customer> = {};
-
-	// Soft guard: Claude 가 가끔 to=from 으로 "변경 없음" 을 돌려주는 경우가 있어
-	// 무의미한 시트 쓰기를 막는다. 진짜 전환이 필요한 경우만 현재단계 업데이트.
-	const newStage = result.stage_change?.to ?? null;
-	if (newStage && newStage !== currentStage) {
-		customerUpdates.현재단계 = newStage as CustomerStage;
-	}
-
-	const fu = result.field_updates ?? {};
-	if (fu.셀렉수신일) customerUpdates.셀렉수신일 = fu.셀렉수신일;
-	if (fu.셀렉컷) customerUpdates.셀렉컷 = fu.셀렉컷;
-	if (fu.추가보정요청일) customerUpdates.추가보정요청일 = fu.추가보정요청일;
-	if (fu.액자옵션) customerUpdates.액자옵션 = fu.액자옵션;
-
-	// 추가보정내용: S6→S5a 루프일 때만 "[N차]" 마커로 누적, 그 외는 덮어쓰기.
-	// S5b→S5a 번복은 overwrite (사양 확정) — 번복은 성격상 현재 요청이 우선.
-	if (fu.추가보정내용) {
-		if (
-			currentStage === CustomerStage.S6 &&
-			newStage === CustomerStage.S5A
-		) {
-			const prev = existing.data.추가보정내용 || "";
-			// 기존 값에 [N차] 마커가 몇 번 찍혔는지 센다. 마커 없음 → 2차부터 시작
-			// (최초 S4→S5a 는 마커 없이 저장되므로 첫 루프는 [2차]).
-			const roundCount = (prev.match(/\[(\d+)차\]/g) || []).length + 2;
-			customerUpdates.추가보정내용 = prev
-				? `${prev}\n[${roundCount}차] ${fu.추가보정내용}`
-				: fu.추가보정내용;
-		} else {
-			customerUpdates.추가보정내용 = fu.추가보정내용;
-		}
-	}
-
-	// 비고 자동 append (원본누락 / 재촬영요청).
-	// 액자누락은 위에서 별도 분기로 처리됐으므로 여기 들어오지 않음.
-	const bigoTag = BIGO_AUTO_WRITE_TAGS[result.intent];
-	if (bigoTag) {
-		const prev = existing.data.비고 || "";
-		const snippet = messageText.slice(0, 100);
-		const line = `[자동] ${bigoTag} (${todayKstDate()}): ${snippet}`;
-		customerUpdates.비고 = prev ? `${prev}\n${line}` : line;
-	}
-
-	const updateKeys = Object.keys(customerUpdates);
-	console.log(
-		`[webhook] handleAutoProcess 고객ID=${existing.data.고객ID} 시트행=${existing.rowNumber} updates=[${updateKeys.join(",")}]`,
-	);
-	if (updateKeys.length > 0) {
-		await withRetry(() => updateCustomerCells(env, existing.rowNumber, customerUpdates));
-		console.log(
-			`[webhook] handleAutoProcess 셀 업데이트 완료 시트행=${existing.rowNumber}`,
-		);
-	} else {
-		console.log("[webhook] handleAutoProcess 업데이트 대상 없음");
-	}
-
-	const oldStageCode = existing.data.현재단계 || "";
-	const newStageCode = parseStage(newStage ?? "");
-	const { title, content } = formatProcessedAlert(
-		existing.data.고객명 || existing.data.톡톡ID,
-		result.intent,
-		oldStageCode ? formatStage(oldStageCode) : "",
-		newStageCode ? formatStage(newStageCode) : newStage,
-	);
-	await safeSendDiscord(env, env.DISCORD_WEBHOOK_PROCESSED, AlertLevel.INFO, title, content);
-
-	await updateBackupStatus(env, rowNumber, "처리완료", {
-		매칭고객ID: existing.data.고객ID,
-		분류결과: summarizeClassification(result),
-	});
-}
-
-/**
- * 액자누락 + S7 반자동 처리.
- *   - 현재단계: S7 그대로 유지 (자동 전환하지 않는다 — 액자 재발주는 사장님이 직접 결정)
- *   - 비고: "[자동] 액자 누락 신고 (YYYY-MM-DD): {메시지 100자}" append (기존 비고 보존)
- *   - 검토상태: "액자누락확인" 으로 표시해 시트에서 필터 가능
- *   - Discord: #처리내역 이 아니라 #긴급에러 / CRITICAL 로 즉시 알림
- */
-async function handleFrameMissing(
-	env: Env,
-	existing: CustomerMatch,
-	result: ClassificationResult,
-	messageText: string,
-	rowNumber: number,
-): Promise<void> {
-	console.log(
-		`[webhook] handleFrameMissing 고객ID=${existing.data.고객ID} 시트행=${existing.rowNumber}`,
-	);
-
-	const snippet = messageText.slice(0, 100);
-	const prev = existing.data.비고 || "";
-	const line = `[자동] 액자 누락 신고 (${todayKstDate()}): ${snippet}`;
-	const customerUpdates: Partial<Customer> = {
-		// 현재단계는 손대지 않는다 (S7 유지).
-		비고: prev ? `${prev}\n${line}` : line,
-		검토상태: "액자누락확인",
-	};
-
-	await withRetry(() =>
-		updateCustomerCells(env, existing.rowNumber, customerUpdates),
-	);
-	console.log(
-		`[webhook] handleFrameMissing 셀 업데이트 완료 시트행=${existing.rowNumber}`,
-	);
-
-	const customerName = existing.data.고객명 || existing.data.톡톡ID;
-	const urgentContent = [
-		`**고객**: ${customerName} (${existing.data.고객ID})`,
-		`**현재단계**: S7 유지 (반자동 처리 — 액자 재발주 판단 필요)`,
-		`**메시지**: ${snippet}`,
-		`**조치**: 비고에 자동 기록, 검토상태 → "액자누락확인"`,
-	].join("\n");
-	await safeSendDiscord(
-		env,
-		env.DISCORD_WEBHOOK_ERROR,
-		AlertLevel.CRITICAL,
-		`⚠️ 액자 누락 신고 — ${customerName}`,
-		urgentContent,
-	);
-
-	await updateBackupStatus(env, rowNumber, "처리완료", {
-		매칭고객ID: existing.data.고객ID,
-		분류결과: summarizeClassification(result),
-	});
-}

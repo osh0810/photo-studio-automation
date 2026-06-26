@@ -126,17 +126,10 @@ export function renderDashboardPage(userEmail: string): string {
 <body>
   <header class="header">
     <button id="hamburger" class="hamburger" aria-label="메뉴">☰</button>
-    <h1>📸 마음껏스튜디오</h1>
+    <h1>대시보드</h1>
   </header>
 
   <div class="container">
-    <div class="stats-grid">
-      <div class="stat-card"><div class="label">전체 예약</div><div class="value" id="stat-total">-</div></div>
-      <div class="stat-card"><div class="label">오늘 촬영</div><div class="value" id="stat-today">-</div></div>
-      <div class="stat-card warning"><div class="label">검토 필요</div><div class="value" id="stat-review">-</div></div>
-      <div class="stat-card"><div class="label">진행 중</div><div class="value" id="stat-progress">-</div></div>
-    </div>
-
     <div class="toolbar">
       <input type="text" id="search" placeholder="고객명 검색..." class="search-box" />
       <select id="stage-filter" class="filter-select">
@@ -265,22 +258,6 @@ export function renderDashboardPage(userEmail: string): string {
       el.style.opacity = '1';
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => { el.style.opacity = '0'; }, 2000);
-    }
-
-    // ── 통계 ─────────────────────────────────────────────────────────────
-    async function fetchStats() {
-      try {
-        const res = await fetch('/api/stats');
-        const data = await res.json();
-        const stageMap = {};
-        data.stages.forEach(s => { stageMap[s.current_stage] = s.count; });
-        const total = data.stages.reduce((sum, s) => sum + s.count, 0);
-        const inProgress = total - (stageMap['S7 액자발주'] || 0);
-        document.getElementById('stat-total').textContent = total;
-        document.getElementById('stat-today').textContent = data.todayShoot;
-        document.getElementById('stat-review').textContent = data.reviewNeeded;
-        document.getElementById('stat-progress').textContent = inProgress;
-      } catch (e) { console.error('Stats 오류:', e); }
     }
 
     // ── 예약 목록 ────────────────────────────────────────────────────────
@@ -608,6 +585,8 @@ export function renderDashboardPage(userEmail: string): string {
       const nav = document.createElement('nav');
       const linkChat = document.createElement('a'); linkChat.href='/chat'; linkChat.textContent='💬 채팅';
       const linkDash = document.createElement('a'); linkDash.href='/dashboard'; linkDash.className='active'; linkDash.textContent='📊 대시보드';
+      const linkUpload = document.createElement('a'); linkUpload.href='/upload-recommend'; linkUpload.textContent='📤 업로드 추천';
+      const linkPhotos = document.createElement('a'); linkPhotos.href='/photos'; linkPhotos.textContent='🖼️ 사진 관리';
       const linkRules = document.createElement('a'); linkRules.href='/rules'; linkRules.textContent='📋 학습 규칙';
       const linkReport = document.createElement('a'); linkReport.href='/report'; linkReport.textContent='📈 리포트';
       const notifItem = buildNotifItem();
@@ -616,14 +595,13 @@ export function renderDashboardPage(userEmail: string): string {
         try { await fetch('/auth/logout', { method: 'POST' }); } catch (_) {}
         location.href = '/login';
       });
-      [linkChat, linkDash, linkRules, linkReport, notifItem, logoutBtn].forEach(el => nav.appendChild(el));
+      [linkChat, linkDash, linkUpload, linkPhotos, linkRules, linkReport, notifItem, logoutBtn].forEach(el => nav.appendChild(el));
       sidebar.appendChild(nav);
       const emailDiv = document.createElement('div'); emailDiv.className='user-email'; emailDiv.textContent=USER_EMAIL; sidebar.appendChild(emailDiv);
       document.body.appendChild(overlay); document.body.appendChild(sidebar);
     });
 
     // ── 초기 로드 ───────────────────────────────────────────────────────
-    fetchStats();
     fetchBookings();
   </script>
 </body>

@@ -15,6 +15,7 @@ import {
 	detectEmailType,
 	parseConfirmEmail,
 	parseCancelEmail,
+	type ParsedCancelEmail,
 } from './email-parser';
 import { sendPushNotification } from './push-sender';
 import {
@@ -810,4 +811,110 @@ async function processCancelEmail(
 		result: 'success',
 		booking_id: parsed.booking_id,
 	};
+}
+
+// ─── orphan_cancel 재시도 ─────────────────────────────────────────────
+// 확정 메일보다 취소 메일이 먼저 처리된 경우(동일 폴링 윈도우 내 race condition),
+// 배치 전체 처리 완료 후 이 함수를 호출해 재시도한다.
+
+export async function retryOrphanCancels(
+	env: Env,
+	orphans: Array<{ messageId: string; bookingId: string }>,
+): Promise<void> {
+	for (const { messageId, bookingId } of orphans) {
+		try {
+			// 1. booking이 이제 존재하는지 확인
+			const booking = await env.DB.prepare(
+				'SELECT booking_id, customer_name FROM bookings WHERE booking_id = ?1',
+			)
+				.bind(bookingId)
+				.first<{ booking_id: string; customer_name: string }>();
+
+			if (!booking) {
+				console.log(
+					`[email-processor] orphan 재시도: booking_id=${bookingId} 여전히 없음 — skip`,
+				);
+				continue;
+			}
+
+			// 2. processed_emails에 저장된 parsed_data 읽기
+			const row = await env.DB.prepare(
+				'SELECT parsed_data FROM processed_emails WHERE message_id = ?1',
+			)
+				.bind(messageId)
+				.first<{ parsed_data: string | null }>();
+
+			if (!row?.parsed_data) {
+				console.warn(
+					`[email-processor] orphan 재시도: parsed_data 없음 message_id=${messageId} — skip`,
+				);
+				continue;
+			}
+
+			let parsed: ParsedCancelEmail;
+			try {
+				parsed = JSON.parse(row.parsed_data) as ParsedCancelEmail;
+			} catch {
+				console.warn(
+					`[email-processor] orphan 재시도: parsed_data JSON 파싱 실패 message_id=${messageId} — skip`,
+				);
+				continue;
+			}
+
+			// 3. 취소 적용
+			const now = nowSqlite();
+			await env.DB.prepare(
+				`UPDATE bookings
+				 SET cancelled = 1, cancelled_at = ?2, cancellation_reason = ?3,
+				     refund_amount = ?4, updated_at = ?5
+				 WHERE booking_id = ?1`,
+			)
+				.bind(bookingId, parsed.cancelled_at, parsed.cancellation_reason, parsed.refund_amount, now)
+				.run();
+
+			console.log(`[email-processor] orphan 재시도 취소 적용: booking_id=${bookingId}`);
+
+			// 4. processed_emails 결과 갱신
+			await env.DB.prepare(
+				`UPDATE processed_emails
+				 SET processing_result = 'success', error_message = 'orphan_cancel 재시도 성공'
+				 WHERE message_id = ?1`,
+			)
+				.bind(messageId)
+				.run();
+
+			// 5. 채팅창 시스템 메시지
+			await insertSystemMessage(env, {
+				title: `❌ 예약 취소: ${parsed.customer_name}`,
+				body:
+					`예약번호: ${parsed.booking_id}\n` +
+					`환불금액: ${parsed.refund_amount.toLocaleString()}원\n` +
+					`사유: ${parsed.cancellation_reason || '미기재'}\n` +
+					`⚠️ (취소 메일이 확정 메일보다 먼저 도착해 지연 처리됨)`,
+				metadata: {
+					source: 'naver_email',
+					type: 'cancel',
+					message_id: messageId,
+					booking_id: bookingId,
+					parsed,
+					retry: true,
+				},
+			});
+
+			// 6. 캘린더 취소 표기
+			try {
+				await markCalendarEventCancelled({ env: env as any, db: env.DB }, bookingId);
+			} catch (err) {
+				console.error(
+					`[email-processor] orphan 재시도 캘린더 취소 실패 booking_id=${bookingId}:`,
+					err,
+				);
+			}
+		} catch (err) {
+			console.error(
+				`[email-processor] orphan 재시도 에러 booking_id=${bookingId}:`,
+				err,
+			);
+		}
+	}
 }

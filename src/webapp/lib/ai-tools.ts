@@ -22,8 +22,7 @@ export type MilestoneType =
   | 'retouched_sent'
   | 'revision_requested'
   | 'revision_no_more'
-  | 'revision_sent'
-  | 'frame_ordered';
+  | 'revision_sent';
 
 export interface ToolDefinition {
   name: string;
@@ -63,7 +62,6 @@ const MILESTONE_COLUMN: Record<MilestoneType, string> = {
   revision_requested: 'revision_requested_at',
   revision_no_more: 'revision_no_more_at',
   revision_sent: 'revision_sent_at',
-  frame_ordered: 'frame_ordered_at',
 };
 
 export const STAGE_LABELS: Record<string, string> = {
@@ -86,7 +84,6 @@ const ALL_MILESTONES: MilestoneType[] = [
   'revision_requested',
   'revision_no_more',
   'revision_sent',
-  'frame_ordered',
 ];
 
 // ─── 도구 정의 ─────────────────────────────────────────────────────────
@@ -98,7 +95,8 @@ export const TOOLS: ToolDefinition[] = [
       '예약(booking)의 특정 milestone 날짜를 기록합니다. 단계는 milestone들로부터 자동 계산됩니다. ' +
       'milestone_type: shoot=촬영, original_sent=원본발송(S2), selection_received=셀렉수신(S3), ' +
       'retouched_sent=보정발송(S4), revision_requested=추가보정요청(S5a), revision_no_more=추가보정없음(S5b), ' +
-      'revision_sent=추가보정발송(S6), frame_ordered=액자발주(S7).',
+      'revision_sent=추가보정발송(S6). ' +
+      '⚠️ frame_ordered(S7 액자발주)는 아뜨레 발주 시스템 webhook에서만 자동 설정됨 — AI가 호출 불가.',
     input_schema: {
       type: 'object',
       properties: {
@@ -371,32 +369,6 @@ export const TOOLS: ToolDefinition[] = [
     },
   },
   {
-    name: 'mark_frame_sent',
-    description:
-      '액자발송 완료 처리. frame_ordered_at을 오늘 날짜(KST)로 업데이트. ' +
-      '동명이인이 있으면 목록을 보여주고 선택을 요청한다.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        customer_name: { type: 'string', description: '고객명' },
-        booking_id: { type: 'string', description: '동명이인 선택 후 재호출 시 사용 (AI 임의 생성 금지)' },
-      },
-      required: ['customer_name'],
-    },
-  },
-  {
-    name: 'confirm_frame_sent_selection',
-    description:
-      "작가님이 '[FRAME_SENT_SELECT_N]' 버튼을 클릭했을 때만 호출. 동명이인 중 선택된 예약의 액자발송 완료 처리. AI 직접 호출 금지.",
-    input_schema: {
-      type: 'object',
-      properties: {
-        selection: { type: 'integer', description: '선택 번호 (1-5)' },
-      },
-      required: ['selection'],
-    },
-  },
-  {
     name: 'save_frame_address',
     description:
       '고객이 액자 배송 주소를 보냈을 때 저장. AI가 톡톡 메시지에서 주소/성함/연락처를 파싱해서 자동 호출. 작가님 확인 불필요.',
@@ -438,21 +410,23 @@ export const TOOLS: ToolDefinition[] = [
   {
     name: 'record_promotion_consent',
     description:
-      '고객이 홍보/업로드 동의를 표현했을 때 기록하고 Drive 폴더명에 동의 유형을 표시합니다. ' +
-      '후기/리뷰 작성 의사, 업로드/인스타/SNS 동의, 이벤트 참여 의사, "업로드 하셔도 돼요" 등이 해당됩니다.',
+      '고객의 홍보/업로드 동의 여부를 기록합니다. 동의(홍보o 계열)와 비동의/철회(홍보x) 모두 기록 가능합니다. ' +
+      '⚠️ 호출 조건: 스튜디오가 고객 사진을 인스타/SNS에 올리는 것에 대한 고객의 허락 또는 거부/철회가 명확할 때만 호출. ' +
+      '고객이 직접 리뷰/후기를 올리겠다는 것("올릴게요", "리뷰 쓸게요")은 동의가 아님 — 호출 금지.',
     input_schema: {
       type: 'object',
       properties: {
         booking_id: { type: 'string', description: '예약번호' },
         consent_type: {
           type: 'string',
-          enum: ['홍보o', '홍보o-아기만', '홍보o-특정사진만'],
+          enum: ['홍보o', '홍보o-아기만', '홍보o-특정사진만', '홍보x'],
           description:
-            '홍보o: 제한 없이 전체 동의, 홍보o-아기만: 아기 사진만 동의, 홍보o-특정사진만: 특정 컷 지정',
+            '홍보o: 제한 없이 전체 동의, 홍보o-아기만: 아기 사진만 동의, 홍보o-특정사진만: 특정 컷 지정, ' +
+            '홍보x: 인스타/SNS 업로드 거부 또는 기존 동의 철회',
         },
         memo: {
           type: 'string',
-          description: 'AI가 파악한 동의 내용 요약 (선택)',
+          description: 'AI가 파악한 동의/거부 내용 요약 (선택)',
         },
       },
       required: ['booking_id', 'consent_type'],
@@ -482,6 +456,22 @@ export const TOOLS: ToolDefinition[] = [
         },
       },
       required: ['new_talk_id', 'candidates'],
+    },
+  },
+  {
+    name: 'cancel_booking',
+    description:
+      '예약을 취소 처리합니다. 작가님이 "OOO님 취소", "예약 취소 처리해줘" 등을 요청할 때 호출. ' +
+      '바로 취소하지 않고 확인 카드를 채팅창에 표시하며, 작가님이 명시적으로 승인해야 실행됩니다. ' +
+      'booking_id에 예약번호 또는 고객명을 넣으면 자동 검색합니다.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        booking_id: { type: 'string', description: '예약번호 또는 고객명' },
+        cancellation_reason: { type: 'string', description: '취소 사유 (선택)' },
+        refund_amount: { type: 'number', description: '환불 금액 (원, 선택)' },
+      },
+      required: ['booking_id'],
     },
   },
 ];
@@ -617,6 +607,21 @@ export async function executeRecordMilestone(
   const beforeValue = (before as any)[column] as string | null;
   const updatedAt = new Date().toISOString();
 
+  // revision_no_more 선행 조건 검증:
+  // retouched_sent_at 또는 revision_sent_at 중 하나라도 있어야 함
+  if (milestone_type === 'revision_no_more') {
+    if (!before.retouched_sent_at && !before.revision_sent_at) {
+      console.warn(
+        `[ai-tool] record_milestone revision_no_more 차단 booking=${booking_id}: retouched_sent_at=${before.retouched_sent_at} revision_sent_at=${before.revision_sent_at}`,
+      );
+      return {
+        error: `revision_no_more(추가보정없음)는 보정본 발송(retouched_sent_at) 또는 재보정 발송(revision_sent_at)이 기록된 후에만 가능합니다. 현재 두 날짜 모두 없습니다.`,
+        booking_id,
+        customer_name: before.customer_name,
+      };
+    }
+  }
+
   // 추가 컬럼 (selection_cuts / revision_content)
   let extraColumn: string | null = null;
   if (milestone_type === 'selection_received' && content) {
@@ -625,8 +630,11 @@ export async function executeRecordMilestone(
     extraColumn = 'revision_content';
   }
 
-  // selection_received 시 alert_paused_until 자동 해제 (15일 초과 자동정지 역방향)
-  const clearAlertPause = milestone_type === 'selection_received' ? ', alert_paused_until = NULL' : '';
+  // 고객 연락(선택수신·추가보정요청) 시 alert_paused_until 자동 해제
+  const clearAlertPause =
+    milestone_type === 'selection_received' || milestone_type === 'revision_requested'
+      ? ', alert_paused_until = NULL'
+      : '';
 
   if (extraColumn) {
     await env.DB.prepare(
@@ -2313,6 +2321,13 @@ export async function executeSaveFrameAddress(
   ).bind(resolved_talk_id).first<{ booking_id: string }>();
   const booking_id = bookingRow?.booking_id ?? null;
 
+  // 주소 수신 = 고객 연락 → alert_paused_until 초기화
+  if (booking_id) {
+    await env.DB.prepare(
+      `UPDATE bookings SET alert_paused_until = NULL, updated_at = datetime('now') WHERE booking_id = ?1`,
+    ).bind(booking_id).run();
+  }
+
   const displayName = customer_name || `미등록(${resolved_talk_id.slice(0, 12)}...)`;
   const msgLines = [
     `📦 액자 배송 주소 저장`,
@@ -2428,7 +2443,7 @@ export async function executeRecordPromotionConsent(
     `UPDATE bookings SET promotion_consent = ?1, updated_at = datetime('now') WHERE booking_id = ?2`,
   ).bind(consent_type, booking_id).run();
 
-  // Drive 폴더 rename
+  // Drive 폴더 rename (홍보x 비동의/철회 시 스킵)
   // hasFolder: URL 컬럼 null 여부로만 판단 (milestone 날짜 무관)
   const { original_folder_url, retouched_folder_url } = booking;
   const hasFolder = original_folder_url !== null || retouched_folder_url !== null;
@@ -2436,7 +2451,7 @@ export async function executeRecordPromotionConsent(
   let folder_renamed = false;
   let new_folder_name: string | null = null;
 
-  if (hasFolder) {
+  if (hasFolder && consent_type !== '홍보x') {
     const renamedParentIds = new Set<string>();
     for (const folderUrl of [original_folder_url, retouched_folder_url]) {
       if (!folderUrl) continue;
@@ -2457,9 +2472,14 @@ export async function executeRecordPromotionConsent(
 
   // 채팅 시스템 메시지
   const customerName = booking.customer_name ?? booking_id;
-  const msgLines = [`✅ [${customerName}] 홍보동의 기록 완료`];
+  const isRefusal = consent_type === '홍보x';
+  const msgLines = [isRefusal
+    ? `❌ [${customerName}] 홍보 비동의 기록`
+    : `✅ [${customerName}] 홍보동의 기록 완료`];
   msgLines.push(`- 동의 유형: ${consent_type}`);
-  if (!hasFolder) {
+  if (isRefusal) {
+    msgLines.push(`- Drive 폴더명 변경 스킵 (비동의)`);
+  } else if (!hasFolder) {
     // 둘 다 null인 경우에만 "미발송 상태" 표시
     msgLines.push(
       `- Drive 폴더 미발송 상태로 폴더명 변경 스킵 (원본/보정본 발송 시점에 자동 반영 불가, 추후 수동 확인 필요)`,
@@ -2536,6 +2556,176 @@ export async function executeShowLinkCandidates(
   return { success: true, candidates: indexed, message: '채팅창에 선택 버튼을 표시했습니다.' };
 }
 
+// ─── cancel_booking ───────────────────────────────────────────────────
+
+export async function executeCancelBookingPending(
+  env: Env,
+  input: Record<string, any>,
+): Promise<unknown> {
+  const inputId = String(input.booking_id || '').trim();
+  const cancellationReason = input.cancellation_reason
+    ? String(input.cancellation_reason)
+    : null;
+  const refundAmount =
+    input.refund_amount != null ? Number(input.refund_amount) : null;
+
+  if (!inputId) return { error: 'booking_id가 필요합니다' };
+
+  type BookingBasic = {
+    booking_id: string;
+    customer_name: string;
+    shoot_date: string | null;
+    cancelled: number | null;
+  };
+
+  // 1) 예약번호 정확 매칭
+  let booking = await env.DB.prepare(
+    `SELECT booking_id, customer_name, shoot_date, cancelled
+     FROM bookings WHERE booking_id = ?1`,
+  )
+    .bind(inputId)
+    .first<BookingBasic>();
+
+  let candidates: Array<{ index: number; booking_id: string; customer_name: string; shoot_date: string | null }> = [];
+
+  if (!booking) {
+    // 2) 고객명으로 검색 (취소되지 않은 예약만)
+    const rows = await env.DB.prepare(
+      `SELECT booking_id, customer_name, shoot_date, cancelled
+       FROM bookings
+       WHERE customer_name LIKE '%' || ?1 || '%'
+         AND (cancelled IS NULL OR cancelled = 0)
+       ORDER BY updated_at DESC
+       LIMIT 5`,
+    )
+      .bind(inputId)
+      .all<BookingBasic>();
+
+    const list = rows.results || [];
+    if (list.length === 0) return { error: `고객을 찾을 수 없습니다: ${inputId}` };
+
+    if (list.length > 1) {
+      // 동명이인 → 후보 선택 카드 표시
+      candidates = list.map((r, i) => ({
+        index: i + 1,
+        booking_id: r.booking_id,
+        customer_name: r.customer_name,
+        shoot_date: r.shoot_date ? r.shoot_date.slice(0, 16).replace('T', ' ') : null,
+      }));
+    } else {
+      booking = list[0];
+    }
+  }
+
+  // 3) 동명이인 케이스
+  if (candidates.length > 0) {
+    const lines = candidates.map(
+      (c) =>
+        `${c.index}번: ${c.customer_name} (예약 ${c.booking_id}${c.shoot_date ? ', 촬영 ' + c.shoot_date : ''})`,
+    );
+    const text =
+      `동명이인이 ${candidates.length}명 있습니다. 어느 예약을 취소할까요?\n\n` +
+      lines.join('\n');
+
+    await env.DB.prepare(
+      `INSERT INTO ai_chat_messages (sender, message, metadata, created_at)
+       VALUES ('system', ?1, ?2, datetime('now'))`,
+    )
+      .bind(
+        text,
+        JSON.stringify({
+          type: 'cancel_candidates',
+          candidates,
+          cancellation_reason: cancellationReason,
+          refund_amount: refundAmount,
+        }),
+      )
+      .run();
+
+    console.log(`[ai-tool] cancel_booking 동명이인 count=${candidates.length}`);
+    return {
+      status: 'needs_selection',
+      message: '채팅창에 후보 선택 버튼을 표시했습니다.',
+    };
+  }
+
+  // 4) 단건
+  if (!booking) return { error: '예약을 찾을 수 없습니다' };
+
+  if (booking.cancelled) {
+    return {
+      error: `이미 취소된 예약입니다: ${booking.booking_id} (${booking.customer_name})`,
+    };
+  }
+
+  // 5) 상품 목록 조회
+  const detailRows = await env.DB.prepare(
+    `SELECT COALESCE(p.product_name, bd.raw_text) AS product_name
+     FROM booking_details bd
+     LEFT JOIN products p ON bd.product_id = p.product_id
+     WHERE bd.booking_id = ?1
+     ORDER BY bd.id`,
+  )
+    .bind(booking.booking_id)
+    .all<{ product_name: string | null }>();
+
+  const products = (detailRows.results || [])
+    .map((r) => r.product_name || '(상품명 없음)')
+    .filter(Boolean);
+
+  // 6) 확인 메시지 텍스트 구성
+  const shootDisplay = booking.shoot_date
+    ? booking.shoot_date.slice(0, 16).replace('T', ' ')
+    : '미정';
+  const productLines =
+    products.length > 0
+      ? products.map((p) => `  · ${p}`).join('\n')
+      : '  · (상품 정보 없음)';
+
+  const confirmText =
+    `❌ 예약 취소 확인\n\n` +
+    `📌 예약번호: ${booking.booking_id}\n` +
+    `👤 고객명: ${booking.customer_name}\n` +
+    `📅 촬영일정: ${shootDisplay}\n` +
+    `🛍 예약상품:\n${productLines}\n\n` +
+    `이 예약을 취소 처리할까요?`;
+
+  // 7) 확인 system message INSERT
+  const actionId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO ai_chat_messages (sender, message, metadata, created_at)
+     VALUES ('system', ?1, ?2, datetime('now'))`,
+  )
+    .bind(
+      confirmText,
+      JSON.stringify({
+        processing: {
+          type: 'cancel_booking_pending',
+          confirmation: {
+            action_id: actionId,
+            action_type: 'cancel_booking',
+            params: {
+              booking_id: booking.booking_id,
+              cancellation_reason: cancellationReason,
+              refund_amount: refundAmount,
+            },
+            buttons: [
+              { label: '✅ 네, 취소합니다', value: 'yes' },
+              { label: '❌ 아니오', value: 'no' },
+            ],
+          },
+        },
+      }),
+    )
+    .run();
+
+  console.log(`[ai-tool] cancel_booking pending booking_id=${booking.booking_id}`);
+  return {
+    status: 'pending_confirmation',
+    message: '취소 확인 카드를 표시했습니다. 작가님이 승인하면 처리됩니다.',
+  };
+}
+
 // ─── 통합 핸들러 ───────────────────────────────────────────────────────
 
 export async function handleToolUse(
@@ -2581,9 +2771,9 @@ export async function handleToolUse(
       case 'confirm_drive_new_products':
         return await executeConfirmDriveNewProducts(env, tool_input);
       case 'mark_frame_sent':
-        return await executeMarkFrameSent(env, tool_input);
+        return { error: 'frame_ordered_at은 아뜨레 발주 시스템 webhook에서만 설정됩니다. AI가 직접 변경할 수 없습니다.' };
       case 'confirm_frame_sent_selection':
-        return await executeConfirmFrameSentSelection(env, tool_input);
+        return { error: 'frame_ordered_at은 아뜨레 발주 시스템 webhook에서만 설정됩니다.' };
       case 'save_frame_address':
         return await executeSaveFrameAddress(env, tool_input);
       case 'record_promotion_consent':
@@ -2592,6 +2782,8 @@ export async function handleToolUse(
         return await executeSetUrgent(env, tool_input);
       case 'show_link_candidates':
         return await executeShowLinkCandidates(env, tool_input);
+      case 'cancel_booking':
+        return await executeCancelBookingPending(env, tool_input);
       default:
         return { error: `알 수 없는 도구: ${tool_name}` };
     }

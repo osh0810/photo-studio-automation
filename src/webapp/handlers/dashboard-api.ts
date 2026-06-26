@@ -211,6 +211,7 @@ const MILESTONE_FIELDS = new Set([
   'shoot_date',
   'original_sent_at',
   'selection_received_at',
+  'selection_cuts',
   'retouched_sent_at',
   'revision_requested_at',
   'revision_sent_at',
@@ -219,6 +220,7 @@ const MILESTONE_FIELDS = new Set([
   'alert_paused_until',
   'urgent_retouch_until',
 ]);
+const TEXT_FIELDS = new Set(['selection_cuts']);
 
 export async function handleGetDashboardBookings(
   request: Request,
@@ -312,7 +314,7 @@ export async function handlePatchMilestone(
 
   let sqlValue: string | null = null;
   if (value !== null && value !== undefined && value !== '') {
-    sqlValue = toSqliteFormat(String(value));
+    sqlValue = TEXT_FIELDS.has(field) ? String(value) : toSqliteFormat(String(value));
   }
 
   const now = new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '');

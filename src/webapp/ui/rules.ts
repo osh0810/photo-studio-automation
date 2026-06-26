@@ -270,6 +270,12 @@ export function renderRulesPage(userEmail: string): string {
       const linkDash = document.createElement('a');
       linkDash.href = '/dashboard';
       linkDash.textContent = '📊 대시보드';
+      const linkUpload = document.createElement('a');
+      linkUpload.href = '/upload-recommend';
+      linkUpload.textContent = '📤 업로드 추천';
+      const linkPhotos = document.createElement('a');
+      linkPhotos.href = '/photos';
+      linkPhotos.textContent = '🖼️ 사진 관리';
       const linkRules = document.createElement('a');
       linkRules.href = '/rules';
       linkRules.className = 'active';
@@ -288,6 +294,8 @@ export function renderRulesPage(userEmail: string): string {
       });
       nav.appendChild(linkChat);
       nav.appendChild(linkDash);
+      nav.appendChild(linkUpload);
+      nav.appendChild(linkPhotos);
       nav.appendChild(linkRules);
       nav.appendChild(linkReport);
       nav.appendChild(notifItem);

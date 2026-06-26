@@ -13,10 +13,11 @@ import {
   executeRecordMilestone,
   executeConfirmDriveNewProducts,
   executeConfirmNameUpdate,
-  executeConfirmFrameSentSelection,
   executeConfirmPendingLink,
   executeLinkTalkIdToBooking,
+  executeCancelBookingPending,
 } from '../lib/ai-tools';
+import { markCalendarEventCancelled } from '../lib/calendar-event-builder';
 import { sendPushNotification } from '../lib/push-sender';
 import { runMorningReport } from '../lib/morning-report';
 import {
@@ -200,23 +201,6 @@ system 메시지는 자동 발생한 알림이며, 작가님이 그 알림에 �
 - 파라미터 없음 — 그냥 호출만 하면 됨
 - AI가 직접 '[NAME_UPDATE_YES]' 등 sentinel을 생성하거나 수동으로 confirm_name_update를 호출하지 말 것
 
-### mark_frame_sent
-- 사용 시점: "홍길동 액자발송 완료", "액자 보냈어 홍길동", "홍길동님 액자 발송됐어" 등
-- customer_name은 작가님이 언급한 고객명 그대로 사용
-- 동명이인이면 목록 표시 후 채팅창 번호 버튼 클릭 기다리기 (AI가 임의로 booking_id 추측 금지)
-- booking_id는 작가님 버튼 선택 후 자동으로 sentinel에서 전달됨
-
-🚨 **mark_frame_sent 절대 규칙**
-- "액자발주완료", "액자 보냈어", "액자 발송" 등 요청이 오면 **반드시 mark_frame_sent 도구 호출**
-- 도구 호출 없이 "완료되었습니다" 등의 메시지를 직접 생성하는 것 **절대 금지**
-- current_stage나 computed_stage 값과 관계없이 작가님 요청 시 무조건 실행
-- 동명이인이 아닌 경우(단일 매칭) 확인 없이 즉시 실행
-- 고객명이 불명확하면 search_customers로 먼저 확인 후 호출
-
-### confirm_frame_sent_selection
-- '[FRAME_SENT_SELECT_N]' 버튼 클릭 시에만 chat-api가 직접 처리 (AI 호출 없음)
-- AI 직접 호출 금지 — 이 도구를 AI가 호출하는 상황은 없음
-
 ### save_frame_address
 - 사용 시점: 고객 톡톡 메시지에 배송 주소가 포함되어 있을 때 자동 호출
   - 도로명/지번 주소 패턴 (시/군/구/동/로/길 등)
@@ -341,15 +325,15 @@ system 메시지에 표시된 정보는 **요약/마스킹된 정보**입니다.
 
 ## 사용 가능한 도구
 
-- record_milestone: 예약의 milestone 날짜 기록 (단계는 자동 계산)
+- record_milestone: 예약의 milestone 날짜 기록 (단계는 자동 계산, S6까지만)
 - search_customers: 고객/누락 단계 검색
 - update_customer_memo: 고객 메모 한 줄 추가
 - add_learned_rule: 반복 패턴을 학습 규칙으로 저장
 - register_product / update_product / list_products: 상품 등록·수정·목록
 - register_question / list_questions: 추가 질문(상품별 추가 안내문) 등록·목록
 - manual_match_booking_detail: 메일 매칭 실패한 예약 항목을 수동으로 상품에 연결
-- mark_frame_sent: 액자발송 완료 처리 (frame_ordered_at 업데이트, 동명이인 자동 처리)
 - save_frame_address: 고객 배송 주소 자동 감지·저장 (확인 불필요, 즉시 호출)
+- cancel_booking: 예약 취소 처리 (확인 카드 표시 후 작가님 승인 시 실행)
 
 ## 도구 사용 가이드
 
@@ -361,7 +345,7 @@ system 메시지에 표시된 정보는 **요약/마스킹된 정보**입니다.
 - "S5a 추가보정요청" 의미 → record_milestone(revision_requested, content="요청내용")
 - "S5b 추가보정없음" 의미 → record_milestone(revision_no_more)
 - "S6 추가보정발송" 의미 → record_milestone(revision_sent)
-- "S7 액자발주" 의미 → record_milestone(frame_ordered)
+- "S7 액자발주" → ⚠️ **AI 처리 불가. 아뜨레 발주 시스템에서 자동 처리됨**
 
 상품/질문 관리 표현 매핑:
 
@@ -388,7 +372,6 @@ system 메시지에 표시된 정보는 **요약/마스킹된 정보**입니다.
 - "원본 보냈어" → record_milestone(original_sent)
 - "셀렉 받았어, 02060,02127번이래" → record_milestone(selection_received, content="02060,02127")
 - "독사진 더 밝게 해달래" → record_milestone(revision_requested, content="독사진 더 밝게")
-- "액자 주문 넣었어" → record_milestone(frame_ordered)
 
 검색/조회 시 부가 정보:
 
@@ -399,9 +382,23 @@ system 메시지에 표시된 정보는 **요약/마스킹된 정보**입니다.
 이전 shoot_date 값이 SQLite 형식("YYYY-MM-DD HH:MM:SS")이 아닌 경우
 시스템이 입력을 거부합니다. 형식 확인 후 호출하세요.
 
+예약 취소 표현 매핑:
+
+- "OOO님 예약 취소해줘" / "OOO님 취소 처리" / "OOO 취소"
+  → cancel_booking(booking_id="OOO") 즉시 호출
+  → 도구가 확인 카드를 채팅창에 표시하므로 작가님에게 따로 묻지 말고 바로 호출
+
+## 🚨 frame_ordered_at (S7 액자발주) 절대 규칙
+
+**frame_ordered_at은 아뜨레 발주 프로그램 webhook에서만 자동 설정됩니다.**
+- 고객이 "액자는 이거로 할게요", "액자 2장으로 해주세요" 등 어떤 말을 해도 **절대 frame_ordered_at 변경 금지**
+- 작가님이 "액자 발주했어", "액자 주문했어" 등 말해도 **AI가 직접 변경 불가**
+- 아뜨레에서 실제 발주가 완료되면 시스템이 자동으로 처리함
+- 이 항목에 관한 요청이 오면: "S7 액자발주는 아뜨레 프로그램에서 발주 시 자동으로 기록됩니다."라고 안내
+
 ## 안전 장치
 
-- record_milestone, frame_ordered 같은 중요 동작은 실행 전 작가님 확인:
+- record_milestone 같은 중요 동작은 실행 전 작가님 확인:
   "허희정님 보정본 발송 기록할까요? [✅ 네] [❌ 아니오]"
   작가님이 "네" 답변한 후에만 도구 호출.
 - 도구 실행 후에는 결과를 자연스럽게 한국어로 보고.
@@ -587,6 +584,105 @@ export async function handleGetMessages(request: Request, env: Env): Promise<Res
       reply
     );
   });
+
+  // photo_upload 메시지에 현재 그룹 상태 enrichment
+  // 다른 메시지의 사진도 같은 그룹이면 primary 메시지에 모아서 표시
+  const photoMsgs = messages.filter(
+    (m) => m.metadata && (m.metadata as any).type === 'photo_upload'
+  );
+  if (photoMsgs.length > 0) {
+    const allPhotoIds: number[] = photoMsgs.flatMap(
+      (m) => ((m.metadata as any).photo_ids as number[]) || []
+    );
+    if (allPhotoIds.length > 0) {
+      // 1. 현재 메시지들의 사진 → group_id 조회
+      const ph = allPhotoIds.map((_, i) => `?${i + 1}`).join(',');
+      const rows = await env.DB.prepare(
+        `SELECT id, group_id, group_order, file_name, created_at FROM photo_uploads WHERE id IN (${ph})`
+      )
+        .bind(...allPhotoIds)
+        .all<{ id: number; group_id: string | null; group_order: number; file_name: string; created_at: string }>();
+
+      const groupMap = new Map<number, { group_id: string | null; group_order: number }>();
+      const photoInfoMap = new Map<number, { file_name: string; created_at: string }>();
+      for (const row of rows.results ?? []) {
+        groupMap.set(row.id, { group_id: row.group_id, group_order: row.group_order });
+        photoInfoMap.set(row.id, { file_name: row.file_name, created_at: row.created_at });
+      }
+
+      // 2. 발견된 그룹 ID 목록 → 그룹에 속한 모든 사진 조회 (다른 메시지 사진 포함)
+      const groupIds = [...new Set(
+        [...groupMap.values()].map(v => v.group_id).filter(Boolean) as string[]
+      )];
+      const allGroupPhotoMap = new Map<string, number[]>(); // group_id → 전체 photo_ids
+      if (groupIds.length > 0) {
+        const gph = groupIds.map((_, i) => `?${i + 1}`).join(',');
+        const gRows = await env.DB.prepare(
+          `SELECT id, group_id, file_name, created_at FROM photo_uploads WHERE group_id IN (${gph}) ORDER BY group_order, id`
+        )
+          .bind(...groupIds)
+          .all<{ id: number; group_id: string; file_name: string; created_at: string }>();
+        for (const r of gRows.results ?? []) {
+          if (!allGroupPhotoMap.has(r.group_id)) allGroupPhotoMap.set(r.group_id, []);
+          allGroupPhotoMap.get(r.group_id)!.push(r.id);
+          if (!photoInfoMap.has(r.id)) photoInfoMap.set(r.id, { file_name: r.file_name, created_at: r.created_at });
+        }
+      }
+
+      // 3. 각 그룹의 primary 메시지 결정 — 그룹 사진을 가장 먼저(낮은 id) 포함한 메시지
+      // messages는 DESC 순서이므로 reverse해서 ASC로 순회
+      const groupPrimaryMsg = new Map<string, number>(); // group_id → msg.id
+      for (const msg of [...photoMsgs].sort((a, b) => a.id - b.id)) {
+        const photoIds: number[] = (msg.metadata as any).photo_ids || [];
+        for (const pid of photoIds) {
+          const gid = groupMap.get(pid)?.group_id;
+          if (gid && !groupPrimaryMsg.has(gid)) groupPrimaryMsg.set(gid, msg.id);
+        }
+      }
+
+      // 4. 각 메시지에 enriched 그룹 정보 주입
+      for (const msg of photoMsgs) {
+        const photoIds: number[] = (msg.metadata as any).photo_ids || [];
+        const seenGroups = new Set<string>();
+        const groups: Array<{ group_id: string; photo_ids: number[]; is_primary: boolean }> = [];
+        const ungrouped: number[] = [];
+
+        for (const pid of photoIds) {
+          const info = groupMap.get(pid);
+          if (!info) continue; // 삭제된 사진은 건너뜀
+          if (info.group_id) {
+            if (!seenGroups.has(info.group_id)) {
+              seenGroups.add(info.group_id);
+              const isPrimary = groupPrimaryMsg.get(info.group_id) === msg.id;
+              groups.push({
+                group_id: info.group_id,
+                // primary 메시지에는 그룹 전체 사진, non-primary는 빈 배열
+                photo_ids: isPrimary ? (allGroupPhotoMap.get(info.group_id) ?? []) : [],
+                is_primary: isPrimary,
+              });
+            }
+          } else {
+            ungrouped.push(pid);
+          }
+        }
+
+        (msg.metadata as any).groups = groups;
+        (msg.metadata as any).ungrouped = ungrouped;
+
+        // 이 메시지에서 실제 렌더되는 photo_id → {file_name, created_at} 맵
+        const visibleIds = [
+          ...ungrouped,
+          ...groups.filter(g => g.is_primary).flatMap(g => g.photo_ids),
+        ];
+        const photo_info: Record<string, { file_name: string; created_at: string }> = {};
+        for (const pid of visibleIds) {
+          const info = photoInfoMap.get(pid);
+          if (info) photo_info[String(pid)] = info;
+        }
+        (msg.metadata as any).photo_info = photo_info;
+      }
+    }
+  }
 
   return Response.json({ messages, hasMore: messages.length >= limit });
 }
@@ -1017,6 +1113,48 @@ export async function handleAIProcess(request: Request, env: Env): Promise<Respo
   // Drive 확정 버튼 sentinel — AI 우회. confirm_drive_new_products 직접 실행 또는 skip 처리.
   const userText = typeof userRow.message === 'string' ? userRow.message : '';
 
+  // ── Phase 7: photo_booking_candidates sentinel ──────────────────────────────
+  const photoLinkMatch = /^\[PHOTO_LINK_SELECT_(\d+)\]$/.exec(userText);
+  if (photoLinkMatch) {
+    const idx = parseInt(photoLinkMatch[1], 10);
+    const candidatesMsg = await env.DB.prepare(
+      `SELECT id, metadata FROM ai_chat_messages
+       WHERE json_extract(metadata, '$.type') = 'photo_booking_candidates'
+       ORDER BY id DESC LIMIT 1`
+    ).first<{ id: number; metadata: string }>();
+
+    let resultMessage = '';
+    if (!candidatesMsg) {
+      resultMessage = '선택할 후보 목록을 찾을 수 없습니다.';
+    } else {
+      let meta: { photo_ids?: number[]; candidates?: Array<{ index: number; booking_id: string; customer_name: string }> } = {};
+      try { meta = JSON.parse(candidatesMsg.metadata); } catch { /* empty */ }
+      const candidate = (meta.candidates ?? []).find((c) => c.index === idx);
+      if (!candidate || !meta.photo_ids?.length) {
+        resultMessage = `${idx}번 후보를 찾을 수 없습니다.`;
+      } else {
+        const placeholders = meta.photo_ids.map((_, i) => `?${i + 2}`).join(',');
+        await env.DB.prepare(
+          `UPDATE photo_uploads SET booking_id = ?1 WHERE id IN (${placeholders})`
+        ).bind(candidate.booking_id, ...meta.photo_ids).run();
+        await env.DB.prepare(
+          `UPDATE ai_chat_messages SET metadata = json_set(metadata, '$.type', 'photo_booking_candidates_used') WHERE id = ?1`
+        ).bind(candidatesMsg.id).run();
+        resultMessage = `✅ ${candidate.customer_name} 예약에 연결했습니다.`;
+      }
+    }
+    const aiRow = await env.DB.prepare(
+      `INSERT INTO ai_chat_messages (sender, message, reply_to_id, metadata, created_at)
+       VALUES ('ai', ?1, ?2, ?3, datetime('now'))
+       RETURNING id, sender, message, reply_to_id, metadata, created_at`
+    ).bind(
+      resultMessage,
+      body.user_message_id,
+      JSON.stringify({ kind: 'ai_call', source: 'photo_link_select' }),
+    ).first<any>();
+    return Response.json({ message: aiRow ? rowToMessage(aiRow) : null });
+  }
+
   // 현재일정 키워드 → runMorningReport(force=true) 즉시 실행, AI 우회
   const REPORT_KEYWORDS = ['현재일정', '현재 일정', '일정확인', '리포트', '현황'];
   if (REPORT_KEYWORDS.some((kw) => userText.includes(kw))) {
@@ -1332,30 +1470,56 @@ export async function handleAIProcess(request: Request, env: Env): Promise<Respo
     return Response.json({ message: aiRow ? rowToMessage(aiRow) : null });
   }
 
-  const frameSentSelectMatch = /^\[FRAME_SENT_SELECT_(\d+)\]$/.exec(userText);
-  if (frameSentSelectMatch) {
-    const selection = parseInt(frameSentSelectMatch[1], 10);
+  // ── CANCEL_SELECT_N ──────────────────────────────────────────────────
+  const cancelSelectMatch = /^\[CANCEL_SELECT_(\d+)\]$/.exec(userText);
+  if (cancelSelectMatch) {
+    const idx = parseInt(cancelSelectMatch[1], 10);
+    const candidatesMsg = await env.DB.prepare(
+      `SELECT id, metadata FROM ai_chat_messages
+       WHERE json_extract(metadata, '$.type') = 'cancel_candidates'
+       ORDER BY id DESC LIMIT 1`,
+    ).first<{ id: number; metadata: string }>();
+
     let resultMessage = '';
-    try {
-      const result = (await executeConfirmFrameSentSelection(env as any, { selection })) as {
-        success?: boolean;
-        message?: string;
-        error?: string;
-      };
-      resultMessage = result?.message || result?.error || '처리 완료';
-    } catch (e) {
-      resultMessage = `처리 실패: ${e instanceof Error ? e.message : String(e)}`;
+    if (!candidatesMsg) {
+      resultMessage = '선택할 후보 목록을 찾을 수 없습니다.';
+    } else {
+      let meta: {
+        candidates?: Array<{ index: number; booking_id: string }>;
+        cancellation_reason?: string | null;
+        refund_amount?: number | null;
+      } = {};
+      try { meta = JSON.parse(candidatesMsg.metadata); } catch (_) {}
+      const candidate = (meta.candidates || []).find((c) => c.index === idx);
+      if (!candidate) {
+        resultMessage = `${idx}번 후보를 찾을 수 없습니다.`;
+      } else {
+        try {
+          const result = (await executeCancelBookingPending(env as any, {
+            booking_id: candidate.booking_id,
+            cancellation_reason: meta.cancellation_reason ?? null,
+            refund_amount: meta.refund_amount ?? null,
+          })) as { status?: string; message?: string; error?: string };
+
+          resultMessage = result?.message || result?.error || '처리 완료';
+
+          if (result?.status === 'pending_confirmation') {
+            await env.DB.prepare(
+              `UPDATE ai_chat_messages SET metadata = json_set(metadata, '$.type', 'cancel_candidates_used') WHERE id = ?1`,
+            ).bind(candidatesMsg.id).run();
+          }
+        } catch (e) {
+          resultMessage = `처리 실패: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
     }
+
     const aiRow = await env.DB.prepare(
       `INSERT INTO ai_chat_messages (sender, message, reply_to_id, metadata, created_at)
        VALUES ('ai', ?1, ?2, ?3, datetime('now'))
        RETURNING id, sender, message, reply_to_id, metadata, created_at`,
     )
-      .bind(
-        resultMessage,
-        body.user_message_id,
-        JSON.stringify({ kind: 'ai_call', source: 'frame_sent_select' }),
-      )
+      .bind(resultMessage, body.user_message_id, JSON.stringify({ kind: 'ai_call', source: 'cancel_select' }))
       .first<any>();
     return Response.json({ message: aiRow ? rowToMessage(aiRow) : null });
   }
@@ -1370,6 +1534,81 @@ export async function handleAIProcess(request: Request, env: Env): Promise<Respo
         created_at: userRow.r_created_at,
       })
     : null;
+
+  // ── Phase 7: 사진 캡션 자동감지 ────────────────────────────────────────────
+  // sentinel이 아닌 일반 텍스트일 때만 캡션으로 처리
+  if (userText && !userText.startsWith('[')) {
+    const replyMeta = replyToContext?.metadata as Record<string, any> | null;
+    const isReplyToPhoto =
+      replyMeta?.type === 'photo_upload' || replyMeta?.type === 'photo_group';
+
+    if (isReplyToPhoto) {
+      const photoIds: number[] = replyMeta?.photo_ids ?? [];
+      const groupId: string | null =
+        (replyMeta?.groups as Array<{ group_id: string; is_primary: boolean }> | undefined)
+          ?.find((g) => g.is_primary)?.group_id ?? null;
+
+      const appendSql = `CASE WHEN caption IS NULL OR caption = '' THEN ?1 ELSE caption || char(10) || ?1 END`;
+
+      if (groupId) {
+        // 그룹 캡션 → primary 사진(group_order=0)에 append
+        await env.DB.prepare(
+          `UPDATE photo_uploads SET caption = ${appendSql} WHERE group_id = ?2 AND group_order = 0`
+        ).bind(userText.trim(), groupId).run();
+      } else if (photoIds.length > 0) {
+        const ph = photoIds.map((_, i) => `?${i + 2}`).join(',');
+        await env.DB.prepare(
+          `UPDATE photo_uploads SET caption = ${appendSql} WHERE id IN (${ph})`
+        ).bind(userText.trim(), ...photoIds).run();
+      }
+
+      const captionAiRow = await env.DB.prepare(
+        `INSERT INTO ai_chat_messages (sender, message, reply_to_id, metadata, created_at)
+         VALUES ('ai', ?1, ?2, ?3, datetime('now'))
+         RETURNING id, sender, message, reply_to_id, metadata, created_at`
+      ).bind('✅ 캡션 저장했습니다.', body.user_message_id,
+             JSON.stringify({ kind: 'ai_call', source: 'photo_caption' })).first<any>();
+      return Response.json({ message: captionAiRow ? rowToMessage(captionAiRow) : null });
+    }
+
+    // reply_to 없을 때: 직전 메시지가 photo_upload이면 배치 캡션
+    if (!replyToContext) {
+      const prevMsg = await env.DB.prepare(
+        `SELECT metadata FROM ai_chat_messages WHERE id < ?1 ORDER BY id DESC LIMIT 1`
+      ).bind(body.user_message_id).first<{ metadata: string | null }>();
+
+      let prevMeta: Record<string, any> | null = null;
+      try { prevMeta = prevMsg?.metadata ? JSON.parse(prevMsg.metadata) : null; } catch { /* empty */ }
+
+      if (prevMeta?.type === 'photo_upload') {
+        const photoIds: number[] = prevMeta.photo_ids ?? [];
+        const prevGroupId: string | null =
+          (prevMeta?.groups as Array<{ group_id: string; is_primary: boolean }> | undefined)
+            ?.find((g) => g.is_primary)?.group_id ?? null;
+        if (photoIds.length > 0) {
+          const appendSql2 = `CASE WHEN caption IS NULL OR caption = '' THEN ?1 ELSE caption || char(10) || ?1 END`;
+          if (prevGroupId) {
+            await env.DB.prepare(
+              `UPDATE photo_uploads SET caption = ${appendSql2} WHERE group_id = ?2 AND group_order = 0`
+            ).bind(userText.trim(), prevGroupId).run();
+          } else {
+            const ph = photoIds.map((_, i) => `?${i + 2}`).join(',');
+            await env.DB.prepare(
+              `UPDATE photo_uploads SET caption = ${appendSql2} WHERE id IN (${ph})`
+            ).bind(userText.trim(), ...photoIds).run();
+          }
+
+          const captionAiRow = await env.DB.prepare(
+            `INSERT INTO ai_chat_messages (sender, message, reply_to_id, metadata, created_at)
+             VALUES ('ai', ?1, ?2, ?3, datetime('now'))
+             RETURNING id, sender, message, reply_to_id, metadata, created_at`
+          ).bind('✅ 캡션 저장했습니다.', body.user_message_id,
+                 JSON.stringify({ kind: 'ai_call', source: 'photo_caption' })).first<any>();
+          return Response.json({ message: captionAiRow ? rowToMessage(captionAiRow) : null });
+        }
+      }
+    }
+  }
 
   // 3. 최근 메시지 10개 (오름차순)
   const historyResult = await env.DB.prepare(
@@ -1738,53 +1977,134 @@ export async function handleChatConfirm(request: Request, env: Env): Promise<Res
   let toolResult: any = null;
 
   if (value === 'yes') {
-    if (confirmation.action_type !== 'record_milestone') {
-      return jsonError(
-        400,
-        `unsupported action_type: ${confirmation.action_type}`,
-      );
-    }
+    if (confirmation.action_type === 'record_milestone') {
+      const params = confirmation.params || {};
+      const rawMilestone = params.milestone_type;
+      const milestoneType = rawMilestone
+        ? rawMilestone === 'shoot_date'
+          ? 'shoot'
+          : String(rawMilestone).replace(/_at$/, '')
+        : null;
 
-    const params = confirmation.params || {};
-    const rawMilestone = params.milestone_type;
-    const milestoneType = rawMilestone
-      ? rawMilestone === 'shoot_date'
-        ? 'shoot'
-        : String(rawMilestone).replace(/_at$/, '')
-      : null;
+      if (!milestoneType || !params.booking_id) {
+        return jsonError(400, 'invalid params for record_milestone');
+      }
 
-    if (!milestoneType || !params.booking_id) {
-      return jsonError(400, 'invalid params for record_milestone');
-    }
+      try {
+        toolResult = await executeRecordMilestone(env as any, {
+          booking_id: params.booking_id,
+          milestone_type: milestoneType,
+          content: params.content,
+          date: params.date,
+        });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        return jsonError(500, `tool error: ${reason}`);
+      }
 
-    try {
-      toolResult = await executeRecordMilestone(env as any, {
-        booking_id: params.booking_id,
-        milestone_type: milestoneType,
-        content: params.content,
-        date: params.date,
-      });
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      return jsonError(500, `tool error: ${reason}`);
-    }
+      const isSuccess =
+        typeof toolResult === 'object' &&
+        toolResult !== null &&
+        (toolResult as any).success === true;
 
-    const isSuccess =
-      typeof toolResult === 'object' &&
-      toolResult !== null &&
-      (toolResult as any).success === true;
+      if (isSuccess) {
+        const stage = (toolResult as any).stage_label
+          ? ` → ${(toolResult as any).stage_label}`
+          : '';
+        followUpMessage = `✅ 처리 완료\n${rawMilestone} 기록됨${stage}`;
+      } else {
+        const errText =
+          typeof toolResult === 'object' && toolResult !== null
+            ? (toolResult as any).error || '알 수 없는 오류'
+            : '알 수 없는 오류';
+        followUpMessage = `⚠️ 처리 실패\n${errText}`;
+      }
+    } else if (confirmation.action_type === 'cancel_booking') {
+      const params = confirmation.params || {};
+      const bookingId = String(params.booking_id || '');
+      if (!bookingId) return jsonError(400, 'booking_id missing in cancel_booking params');
 
-    if (isSuccess) {
-      const stage = (toolResult as any).stage_label
-        ? ` → ${(toolResult as any).stage_label}`
-        : '';
-      followUpMessage = `✅ 처리 완료\n${rawMilestone} 기록됨${stage}`;
+      const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+      await env.DB.prepare(
+        `UPDATE bookings
+         SET cancelled = 1, cancelled_at = ?2, cancellation_reason = ?3,
+             refund_amount = ?4, updated_at = ?5
+         WHERE booking_id = ?1`,
+      )
+        .bind(
+          bookingId,
+          now,
+          params.cancellation_reason ?? null,
+          params.refund_amount ?? null,
+          now,
+        )
+        .run();
+
+      toolResult = { success: true, booking_id: bookingId };
+      followUpMessage = `✅ 예약 취소 완료\n예약번호 ${bookingId} 취소 처리됐습니다.`;
+
+      // 캘린더 취소 표기 (throw 안 함 — 메인 처리 흐름 유지)
+      let calendarStatus: string | null = null;
+      let calendarError: string | null = null;
+      try {
+        const result = await markCalendarEventCancelled(
+          { env: env as any, db: env.DB },
+          bookingId,
+        );
+        calendarStatus = result.status;
+      } catch (err) {
+        calendarError = err instanceof Error ? err.message : String(err);
+        console.error('[cancel_booking] calendar throw:', bookingId, calendarError);
+      }
+
+      const needsAlert =
+        calendarError !== null ||
+        calendarStatus === 'no_event_id' ||
+        calendarStatus === 'not_found';
+
+      if (needsAlert) {
+        let reasonText: string;
+        if (calendarError) {
+          reasonText = `에러: ${calendarError}`;
+        } else if (calendarStatus === 'no_event_id') {
+          reasonText = '캘린더에 등록된 적이 없는 예약입니다';
+        } else {
+          reasonText = '캘린더에서 이벤트를 찾을 수 없습니다 (수동 삭제됐을 수 있음)';
+        }
+
+        const alertMsg =
+          `🚨🚨🚨 캘린더 취소 표기 누락 🚨🚨🚨\n\n` +
+          `📌 예약번호: ${bookingId}\n` +
+          `📌 사유: ${reasonText}\n\n` +
+          `⚠️ 해당 일정이 캘린더에 남아 있다면 직접 취소 표기 부탁드립니다.`;
+
+        await env.DB.prepare(
+          `INSERT INTO ai_chat_messages (sender, message, metadata, created_at)
+           VALUES ('system', ?1, ?2, datetime('now'))`,
+        )
+          .bind(
+            alertMsg,
+            JSON.stringify({
+              type: 'calendar_cancel_alert',
+              booking_id: bookingId,
+              status: calendarStatus,
+              error: calendarError,
+            }),
+          )
+          .run();
+
+        if (env.ALLOWED_EMAIL) {
+          sendPushNotification(env as any, env.ALLOWED_EMAIL, {
+            title: '🚨 캘린더 취소 표기 누락',
+            body: `${bookingId} — 채팅창 확인 필요`,
+            tag: `calendar_cancel_alert_${bookingId}`,
+            data: { source: 'calendar_cancel_alert', booking_id: bookingId },
+          }).catch((e) => console.error('[cancel_booking] push failed:', e));
+        }
+      }
     } else {
-      const errText =
-        typeof toolResult === 'object' && toolResult !== null
-          ? (toolResult as any).error || '알 수 없는 오류'
-          : '알 수 없는 오류';
-      followUpMessage = `⚠️ 처리 실패\n${errText}`;
+      return jsonError(400, `unsupported action_type: ${confirmation.action_type}`);
     }
   } else {
     followUpMessage = '❌ 취소했어요. 작가님이 직접 처리해주세요.';
@@ -1826,4 +2146,83 @@ export async function handleChatConfirm(request: Request, env: Env): Promise<Res
     follow_up_message_id: followUpId,
     tool_result: toolResult,
   });
+}
+
+// ─── POST /api/chat/skip-confirm ─────────────────────────────────────────────
+export async function handleSkipConfirm(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const auth = await requireAuth(request, env as any);
+  if (auth instanceof Response) return auth;
+
+  let body: { message_id: number };
+  try {
+    body = await request.json<{ message_id: number }>();
+  } catch {
+    return jsonError(400, 'invalid json');
+  }
+
+  const messageId = Number(body.message_id);
+  if (!Number.isInteger(messageId) || messageId <= 0) {
+    return jsonError(400, 'invalid message_id');
+  }
+
+  const msgRow = await env.DB.prepare(
+    `SELECT id, metadata FROM ai_chat_messages WHERE id = ?1`,
+  ).bind(messageId).first<{ id: number; metadata: string | null }>();
+
+  if (!msgRow) return jsonError(404, 'message not found');
+
+  let metadata: any;
+  try {
+    metadata = msgRow.metadata ? JSON.parse(msgRow.metadata) : {};
+  } catch {
+    return jsonError(500, 'metadata parse error');
+  }
+
+  if (metadata?.processing?.responded) {
+    return jsonError(400, 'already responded');
+  }
+
+  if (!metadata.processing) metadata.processing = {};
+  metadata.processing.responded = 'no';
+
+  await env.DB.prepare(
+    `UPDATE ai_chat_messages SET metadata = ?1 WHERE id = ?2`,
+  ).bind(JSON.stringify(metadata), messageId).run();
+
+  return Response.json({ success: true });
+}
+
+// ─── GET /api/chat/pending-confirmations ─────────────────────────────────────
+export async function handleGetPendingConfirmations(
+  _request: Request,
+  env: Env,
+): Promise<Response> {
+  const rows = await env.DB.prepare(
+    `SELECT id, message, metadata, created_at
+     FROM ai_chat_messages
+     WHERE json_extract(metadata, '$.processing.type') = 'ai_confirm'
+       AND json_extract(metadata, '$.processing.responded') IS NULL
+       AND datetime(created_at) >= datetime('now', '-30 days')
+     ORDER BY created_at ASC`,
+  ).all<{ id: number; message: string; metadata: string; created_at: string }>();
+
+  const items = (rows.results || []).map((r) => {
+    let customerName: string | null = null;
+    try {
+      const meta = JSON.parse(r.metadata || '{}');
+      customerName = meta.customer_name || null;
+    } catch {}
+    const firstLine = r.message.split('\n').find((l) => l.trim()) || '';
+    return {
+      id: r.id,
+      customer_name: customerName,
+      summary: firstLine.slice(0, 80),
+      created_at: r.created_at,
+    };
+  });
+
+  return Response.json({ items });
 }

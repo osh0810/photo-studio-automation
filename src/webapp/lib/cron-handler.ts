@@ -122,6 +122,7 @@ async function dispatchPush(
 	context: CustomerContext,
 	msgId: number,
 	requiresConfirmation: boolean,
+	confirmText?: string,
 ): Promise<void> {
 	if (!env.ALLOWED_EMAIL) {
 		console.log('[batch] push skip — ALLOWED_EMAIL 미설정');
@@ -134,10 +135,17 @@ async function dispatchPush(
 		context.customer.customer_name ||
 		`미등록(${context.customer.talk_id.slice(0, 12)}...)`;
 
+	const title = requiresConfirmation
+		? `❓ ${customerLabel} 확인 필요`
+		: `${customerLabel} 새 메시지`;
+	const body = requiresConfirmation && confirmText
+		? confirmText.slice(0, 150)
+		: firstMsg;
+
 	try {
 		const result = await sendPushNotification(env as any, env.ALLOWED_EMAIL, {
-			title: `${customerLabel} 새 메시지`,
-			body: firstMsg,
+			title,
+			body,
 			data: {
 				chat_message_id: msgId,
 				talk_id: context.customer.talk_id,
@@ -276,6 +284,7 @@ async function processBatch(
 		let msgId: number;
 		let requiresConfirmation = false;
 		let shouldPush = true;
+		let confirmText: string | undefined;
 		switch (aiResult.type) {
 			case 'auto_processed':
 				msgId = await createAiAutoMessage(
@@ -294,6 +303,7 @@ async function processBatch(
 					aiResult.confirmation,
 				);
 				requiresConfirmation = aiResult.confirmation != null;
+				confirmText = aiResult.ai_text;
 				break;
 			case 'info_only':
 				// info_only는 채팅창 노이즈 방지 위해 system 메시지 INSERT 스킵.
@@ -318,7 +328,7 @@ async function processBatch(
 			`[batch] AI 결과=${aiResult.type} → system 메시지 id=${msgId}`,
 		);
 		if (shouldPush) {
-			await dispatchPush(env, context, msgId, requiresConfirmation);
+			await dispatchPush(env, context, msgId, requiresConfirmation, confirmText);
 		} else {
 			console.log(`[batch] push skip (type=${aiResult.type})`);
 		}
@@ -439,6 +449,24 @@ async function scanDoneEchoForMilestones(env: CronEnv): Promise<void> {
 			if (result.type === 'auto_processed') {
 				console.log(
 					`[echo-scan] talk_id=${talkId} milestone 자동기록 tools=${result.tool_uses.map((t) => t.name).join(',')}`,
+				);
+			} else if (result.type === 'awaiting_confirm') {
+				// done_echo 소급 스캔에서 awaiting_confirm → 채팅창 카드 생성 + 배너 표시
+				const msgId = await createAiConfirmMessage(
+					env as unknown as Env,
+					context,
+					result.ai_text,
+					result.confirmation,
+				);
+				console.log(
+					`[echo-scan] talk_id=${talkId} awaiting_confirm → system 메시지 생성 id=${msgId}`,
+				);
+				await dispatchPush(
+					env,
+					context,
+					msgId,
+					result.confirmation != null,
+					result.ai_text,
 				);
 			} else {
 				console.log(`[echo-scan] talk_id=${talkId} 스킵 type=${result.type}`);

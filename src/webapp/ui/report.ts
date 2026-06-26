@@ -266,6 +266,8 @@ export function renderReportPage(userEmail: string): string {
       }
       nav.appendChild(mkLink('/chat', '💬 채팅', false));
       nav.appendChild(mkLink('/dashboard', '📊 대시보드', false));
+      nav.appendChild(mkLink('/upload-recommend', '📤 업로드 추천', false));
+      nav.appendChild(mkLink('/photos', '🖼️ 사진 관리', false));
       nav.appendChild(mkLink('/rules', '📋 학습 규칙', false));
       nav.appendChild(mkLink('/report', '📈 리포트', true));
       nav.appendChild(buildNotifItem());
