@@ -1,12 +1,14 @@
 /**
  * 확정문자 + 추가질문 메시지 생성 (Phase 4 Step 4-C).
- * 메일 도착 시 booking + booking_details + products + additional_questions 조합.
+ * 메일 도착 시 booking + booking_details + products 조합.
+ * 추가질문은 products.additional_question_text 컬럼에서 직접 가져옴.
  */
 
 export interface BookingDetailWithProduct {
 	product_id: number | null;
 	product_name: string | null;
 	match_keyword: string | null;
+	additional_question_text?: string | null;
 	retouch_count: number;
 	retouch_breakdown: string | null;
 	frame_count: number;
@@ -14,13 +16,6 @@ export interface BookingDetailWithProduct {
 	extra_note: string | null;
 	raw_text: string;
 	match_status: 'matched' | 'unmatched' | 'manual';
-}
-
-export interface AdditionalQuestion {
-	question_id: number;
-	question_code: string;
-	trigger_keyword: string;
-	question_text: string;
 }
 
 // 안내사항 [D] — 하드코딩 (변경 시 클로드코드에게 수정 요청)
@@ -136,41 +131,17 @@ ${GUIDE_TEXT}
 }
 
 /**
- * 추가질문 매칭 (공백 무시).
- * booking_details의 match_keyword에 trigger_keyword 포함 여부 검사.
+ * 추가질문 메시지 생성.
+ * products.additional_question_text 컬럼에서 직접 가져옴.
+ * matched 상품 중 additional_question_text가 있는 첫 번째 값을 반환.
  */
-export function matchAdditionalQuestions(
+export function buildAdditionalQuestionMessageFromProducts(
 	details: BookingDetailWithProduct[],
-	questions: AdditionalQuestion[],
-): AdditionalQuestion[] {
-	const matchKeywords = details
-		.filter((d) => d.match_keyword)
-		.map((d) => (d.match_keyword as string).replace(/\s/g, ''));
-
-	if (matchKeywords.length === 0) return [];
-
-	const matched: AdditionalQuestion[] = [];
-	const seenCodes = new Set<string>();
-
-	for (const q of questions) {
-		const trigger = q.trigger_keyword.replace(/\s/g, '');
-		if (matchKeywords.some((mk) => mk.includes(trigger))) {
-			if (!seenCodes.has(q.question_code)) {
-				matched.push(q);
-				seenCodes.add(q.question_code);
-			}
+): string | null {
+	for (const d of details) {
+		if (d.match_status !== 'unmatched' && d.additional_question_text) {
+			return d.additional_question_text;
 		}
 	}
-
-	return matched;
-}
-
-/**
- * 추가질문 메시지 생성 (여러 개면 줄바꿈 묶음).
- */
-export function buildAdditionalQuestionMessage(
-	matched: AdditionalQuestion[],
-): string | null {
-	if (matched.length === 0) return null;
-	return matched.map((q) => q.question_text).join('\n\n');
+	return null;
 }

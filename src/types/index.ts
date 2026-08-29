@@ -29,6 +29,7 @@ declare global {
 			NAVER_BIZ_ID: string;
 			CALENDAR_ID: string;
 			TIMEZONE: string;
+			BASE_URL: string;
 		}
 	}
 }

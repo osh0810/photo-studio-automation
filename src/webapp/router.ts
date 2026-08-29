@@ -7,6 +7,7 @@ import { handleLogin, handleCallback, handleLogout, handleReauth, requireAuth } 
 import { renderLoginPage } from './ui/login';
 import { renderDashboardPage } from './ui/dashboard';
 import { renderChatPage } from './ui/chat';
+import { renderCostPage } from './ui/cost';
 import {
   handleGetBookings,
   handleGetBookingDetail,
@@ -15,7 +16,14 @@ import {
   handlePatchMilestone,
   handleManualBooking,
   handleProductSearch,
+  handleTalkContacts,
+  handleGetCostLog,
+  handleGetProxyLinks,
+  handleDeleteProxyLink,
+  handleGetSettings,
+  handlePatchSetting,
 } from './handlers/dashboard-api';
+import { renderLinksPage } from './ui/links';
 import {
   handleGetMessages,
   handleSend,
@@ -25,6 +33,13 @@ import {
   handleGetPendingConfirmations,
 } from './handlers/chat-api';
 import { handleRulesPage, handleGetRules, handleToggleRule } from './handlers/rules';
+import {
+  handleGetMemos,
+  handlePatchMemo,
+  handleDeleteMemo,
+  handleReorderMemos,
+} from './handlers/memo-api';
+import { renderMemosPage } from './ui/memo';
 import { handleReportPage, handleGetReport } from './handlers/report';
 import {
   handleGetVapidPublicKey,
@@ -276,6 +291,50 @@ if (pathname === '/api/bookings/manual' && request.method === 'POST') {
     return handleManualBooking(request, env);
 }
 
+if (pathname === '/api/talk-contacts' && request.method === 'GET') {
+    return handleTalkContacts(request, env);
+}
+
+if (pathname === '/api/cost' && request.method === 'GET') {
+    return handleGetCostLog(request, env);
+}
+
+if (pathname === '/cost' && request.method === 'GET') {
+    const auth = await requireAuth(request, env);
+    if (auth instanceof Response) return auth;
+    return new Response(renderCostPage(auth.userEmail), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    });
+}
+
+// 개발 메모 페이지
+if (pathname === '/memos' && request.method === 'GET') {
+    const auth = await requireAuth(request, env);
+    if (auth instanceof Response) return auth;
+    return new Response(renderMemosPage(auth.userEmail), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    });
+}
+
+// 개발 메모 API
+if (pathname === '/api/memos' && request.method === 'GET') {
+    return handleGetMemos(request, env);
+}
+
+if (pathname === '/api/memos/reorder' && request.method === 'POST') {
+    return handleReorderMemos(request, env);
+}
+
+{
+    const m = pathname.match(/^\/api\/memos\/(\d+)$/);
+    if (m && request.method === 'PATCH') {
+        return handlePatchMemo(request, env, m[1]);
+    }
+    if (m && request.method === 'DELETE') {
+        return handleDeleteMemo(request, env, m[1]);
+    }
+}
+
 if (pathname === '/api/products/search' && request.method === 'GET') {
     return handleProductSearch(request, env);
 }
@@ -418,6 +477,65 @@ if (pathname === '/api/photos/booking-link' && request.method === 'POST') {
   const m = pathname.match(/^\/api\/photos\/group-all\/([^/]+)$/);
   if (m && request.method === 'DELETE') {
     return handlePhotoGroupAllDelete(request, env, m[1]);
+  }
+}
+
+// 링크 관리 페이지
+if (pathname === '/links' && request.method === 'GET') {
+  const auth = await requireAuth(request, env);
+  if (auth instanceof Response) return auth;
+  return new Response(renderLinksPage(auth.userEmail), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+}
+
+// 프록시 링크 API
+if (pathname === '/api/proxy-links' && request.method === 'GET') {
+  return handleGetProxyLinks(request, env);
+}
+
+// 앱 설정 API
+if (pathname === '/api/settings' && request.method === 'GET') {
+  return handleGetSettings(request, env);
+}
+if (pathname === '/api/settings' && request.method === 'PATCH') {
+  return handlePatchSetting(request, env);
+}
+{
+  const m = pathname.match(/^\/api\/proxy-links\/([A-Za-z0-9]+)$/);
+  if (m && request.method === 'DELETE') {
+    return handleDeleteProxyLink(request, env, m[1]);
+  }
+}
+
+// 파일 프록시 링크: /f/:token (인증 불필요, 공개 접근)
+{
+  const m = pathname.match(/^\/f\/([A-Za-z0-9]+)$/);
+  if (m && request.method === 'GET') {
+    const { lookupProxyToken } = await import('./lib/proxy-link');
+    const result = await lookupProxyToken(env.DB, m[1]);
+
+    if (!result) {
+      return new Response('링크를 찾을 수 없습니다.', { status: 404 });
+    }
+
+    // 접속 이력 기록 (만료 여부와 무관하게 카운트)
+    await env.DB.prepare(
+      `UPDATE file_proxy_tokens
+       SET access_count = access_count + 1, last_accessed_at = datetime('now')
+       WHERE token = ?1`,
+    ).bind(m[1]).run().catch(() => {});
+
+    if (result.expired) {
+      return new Response(
+        `<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><title>링크 만료</title>
+        <style>body{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f9f9f9}
+        .box{background:#fff;border-radius:12px;padding:40px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.08);max-width:360px}
+        h2{color:#e53e3e;margin-bottom:12px}p{color:#555;line-height:1.6}</style></head>
+        <body><div class="box"><h2>링크가 만료되었습니다</h2>
+        <p>마음껏스튜디오에 문의해 주세요.</p></div></body></html>`,
+        { status: 410, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+      );
+    }
+    return Response.redirect(result.row.original_url, 302);
   }
 }
 

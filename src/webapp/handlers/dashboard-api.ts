@@ -192,9 +192,10 @@ function computeStage(b: StageInput): string {
   if (b.cancelled) return '취소';
   if (b.frame_ordered_at) return '액자발주완료';
   if (b.revision_no_more_at) return '추가보정없음';
-  if (b.revision_sent_at && b.revision_requested_at) {
-    if (b.revision_sent_at > b.revision_requested_at) return '재보정완료';
-    if (b.revision_sent_at < b.revision_requested_at) return '재보정요청';
+  if (b.revision_requested_at) {
+    if (!b.revision_sent_at) return '재보정요청';
+    if (b.revision_sent_at >= b.revision_requested_at) return '재보정완료';
+    return '재보정요청';
   }
   if (b.retouched_sent_at) return '보정완료';
   if (b.selection_received_at) return '셀렉완료';
@@ -378,6 +379,145 @@ export async function handleGetStats(request: Request, env: Env): Promise<Respon
 }
 
 /**
+ * GET /api/cost?days=30
+ * API 비용 로그 조회 (기간별 집계 + 최근 상세 내역).
+ */
+export async function handleGetCostLog(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env as any);
+  if (auth instanceof Response) return auth;
+
+  const url = new URL(request.url);
+  const days = Math.min(parseInt(url.searchParams.get('days') || '30'), 365);
+
+  // 기간별 일일 집계
+  const dailyRows = await env.DB.prepare(
+    `SELECT
+       date(logged_at, '+9 hours') AS day_kst,
+       operation,
+       COUNT(*) AS call_count,
+       SUM(input_tokens)  AS total_input,
+       SUM(output_tokens) AS total_output,
+       SUM(cost_usd)      AS total_cost_usd
+     FROM api_usage_log
+     WHERE logged_at >= datetime('now', ?1)
+     GROUP BY day_kst, operation
+     ORDER BY day_kst DESC, operation`,
+  ).bind(`-${days} days`).all<{
+    day_kst: string;
+    operation: string;
+    call_count: number;
+    total_input: number;
+    total_output: number;
+    total_cost_usd: number;
+  }>();
+
+  // 요약 (전체 기간)
+  const summary = await env.DB.prepare(
+    `SELECT
+       COUNT(*) AS total_calls,
+       SUM(input_tokens + output_tokens) AS total_tokens,
+       SUM(cost_usd) AS total_cost_usd,
+       SUM(CASE WHEN date(logged_at, '+9 hours') = date('now', '+9 hours') THEN cost_usd ELSE 0 END) AS today_cost_usd,
+       SUM(CASE WHEN strftime('%Y-%m', logged_at, '+9 hours') = strftime('%Y-%m', 'now', '+9 hours') THEN cost_usd ELSE 0 END) AS month_cost_usd
+     FROM api_usage_log
+     WHERE logged_at >= datetime('now', ?1)`,
+  ).bind(`-${days} days`).first<{
+    total_calls: number;
+    total_tokens: number;
+    total_cost_usd: number;
+    today_cost_usd: number;
+    month_cost_usd: number;
+  }>();
+
+  // 최근 상세 내역 100건
+  const recentRows = await env.DB.prepare(
+    `SELECT
+       id,
+       datetime(logged_at, '+9 hours') AS logged_at_kst,
+       operation, model,
+       input_tokens, output_tokens,
+       cache_read_tokens, cache_write_tokens,
+       cost_usd,
+       context_text,
+       talk_id
+     FROM api_usage_log
+     ORDER BY logged_at DESC
+     LIMIT 100`,
+  ).all<{
+    id: number;
+    logged_at_kst: string;
+    operation: string;
+    model: string;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    cost_usd: number;
+    context_text: string | null;
+    talk_id: string | null;
+  }>();
+
+  return Response.json({
+    summary: summary ?? { total_calls: 0, total_tokens: 0, total_cost_usd: 0, today_cost_usd: 0, month_cost_usd: 0 },
+    daily: dailyRows.results,
+    recent: recentRows.results,
+  });
+}
+
+/**
+ * GET /api/talk-contacts?q=검색어
+ * 기존 customers(이름/전화) + talk_messages 전용 고객(대화내용) 통합 검색.
+ */
+export async function handleTalkContacts(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env as any);
+  if (auth instanceof Response) return auth;
+
+  const url = new URL(request.url);
+  const q = url.searchParams.get('q')?.trim() ?? '';
+  if (!q) return Response.json({ customers: [], talkOnly: [] });
+
+  const like = `%${q}%`;
+
+  // 1. customers 테이블에서 이름 또는 전화번호 검색 (실제 talk_id 있는 것만)
+  const custResult = await env.DB.prepare(
+    `SELECT talk_id, customer_name, phone
+     FROM customers
+     WHERE talk_id NOT LIKE 'MANUAL_%'
+       AND (customer_name LIKE ?1 OR phone LIKE ?1)
+     ORDER BY updated_at DESC
+     LIMIT 15`,
+  ).bind(like).all<{ talk_id: string; customer_name: string; phone: string | null }>();
+
+  // 2. talk_messages에서 대화 내용 검색 (customers에 없는 talk_id만)
+  const talkResult = await env.DB.prepare(
+    `SELECT
+       tm.talk_id,
+       tm.message_content AS matched_message,
+       tm.message_at      AS matched_at,
+       (SELECT message_content FROM talk_messages
+        WHERE talk_id = tm.talk_id AND sender_type = 'customer'
+        ORDER BY message_at DESC LIMIT 1) AS last_message,
+       (SELECT message_at FROM talk_messages
+        WHERE talk_id = tm.talk_id
+        ORDER BY message_at DESC LIMIT 1) AS last_message_at
+     FROM talk_messages tm
+     WHERE tm.message_content LIKE ?1
+       AND tm.talk_id NOT IN (SELECT talk_id FROM customers WHERE talk_id IS NOT NULL)
+     GROUP BY tm.talk_id
+     ORDER BY tm.message_at DESC
+     LIMIT 10`,
+  ).bind(like).all<{
+    talk_id: string;
+    matched_message: string;
+    matched_at: string;
+    last_message: string | null;
+    last_message_at: string | null;
+  }>();
+
+  return Response.json({ customers: custResult.results, talkOnly: talkResult.results });
+}
+
+/**
  * POST /api/bookings/manual — 현장결제/수동 예약 생성.
  */
 export async function handleManualBooking(request: Request, env: Env): Promise<Response> {
@@ -396,7 +536,8 @@ export async function handleManualBooking(request: Request, env: Env): Promise<R
 
   const now = Date.now();
   const booking_id = `MANUAL_${now}`;
-  const talk_id = `MANUAL_${now}_${customer_name}`;
+  // body.talk_id가 있으면 실제 톡톡 ID 사용, 없으면 임시 ID 생성
+  const talk_id = body.talk_id ? String(body.talk_id).trim() : `MANUAL_${now}_${customer_name}`;
   const phone = body.phone ? String(body.phone).trim() : null;
   const consultation_channel = body.consultation_channel ? String(body.consultation_channel).trim() : null;
   const payment_method = body.payment_method ? String(body.payment_method).trim() : null;
@@ -529,6 +670,117 @@ export async function handleManualBooking(request: Request, env: Env): Promise<R
     console.error('[manual-booking] 오류:', msg);
     return Response.json({ error: msg }, { status: 500 });
   }
+}
+
+/**
+ * GET /api/proxy-links — 프록시 링크 목록 (만료일 + 고객 정보 포함).
+ */
+export async function handleGetProxyLinks(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env as any);
+  if (auth instanceof Response) return auth;
+
+  const url = new URL(request.url);
+  const filter = url.searchParams.get('filter') || 'all'; // all | active | expired
+
+  let whereClause = '';
+  if (filter === 'active') whereClause = "WHERE pt.expires_at > datetime('now')";
+  else if (filter === 'expired') whereClause = "WHERE pt.expires_at <= datetime('now')";
+
+  const rows = await env.DB.prepare(
+    `SELECT
+       pt.id,
+       pt.token,
+       pt.original_url,
+       pt.booking_id,
+       pt.link_type,
+       pt.expires_at,
+       pt.created_at,
+       pt.access_count,
+       pt.last_accessed_at,
+       b.customer_name,
+       b.shoot_date,
+       b.current_stage
+     FROM file_proxy_tokens pt
+     LEFT JOIN bookings b ON pt.booking_id = b.booking_id
+     ${whereClause}
+     ORDER BY pt.created_at DESC
+     LIMIT 200`,
+  ).all<{
+    id: number;
+    token: string;
+    original_url: string;
+    booking_id: string | null;
+    link_type: string | null;
+    expires_at: string;
+    created_at: string;
+    access_count: number;
+    last_accessed_at: string | null;
+    customer_name: string | null;
+    shoot_date: string | null;
+    current_stage: string | null;
+  }>();
+
+  return Response.json({ links: rows.results || [] });
+}
+
+/**
+ * DELETE /api/proxy-links/:token — 프록시 링크 즉시 만료.
+ */
+export async function handleDeleteProxyLink(request: Request, env: Env, token: string): Promise<Response> {
+  const auth = await requireAuth(request, env as any);
+  if (auth instanceof Response) return auth;
+
+  const result = await env.DB.prepare(
+    `UPDATE file_proxy_tokens SET expires_at = datetime('now', '-1 second') WHERE token = ?1`,
+  ).bind(token).run();
+
+  if ((result.meta?.changes ?? 0) === 0) {
+    return Response.json({ error: '링크를 찾을 수 없습니다.' }, { status: 404 });
+  }
+  return Response.json({ success: true });
+}
+
+/**
+ * GET /api/settings?keys=key1,key2 — 앱 설정 조회.
+ */
+export async function handleGetSettings(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env as any);
+  if (auth instanceof Response) return auth;
+
+  const keys = new URL(request.url).searchParams.get('keys')?.split(',').filter(Boolean) ?? [];
+  if (keys.length === 0) {
+    const rows = await env.DB.prepare(`SELECT key, value FROM app_settings`).all<{ key: string; value: string }>();
+    const settings: Record<string, string> = {};
+    for (const r of rows.results ?? []) settings[r.key] = r.value;
+    return Response.json({ settings });
+  }
+
+  const placeholders = keys.map((_, i) => `?${i + 1}`).join(',');
+  const rows = await env.DB.prepare(
+    `SELECT key, value FROM app_settings WHERE key IN (${placeholders})`,
+  ).bind(...keys).all<{ key: string; value: string }>();
+
+  const settings: Record<string, string> = {};
+  for (const r of rows.results ?? []) settings[r.key] = r.value;
+  return Response.json({ settings });
+}
+
+/**
+ * PATCH /api/settings — 앱 설정 저장. body: { key, value }
+ */
+export async function handlePatchSetting(request: Request, env: Env): Promise<Response> {
+  const auth = await requireAuth(request, env as any);
+  if (auth instanceof Response) return auth;
+
+  const { key, value } = await request.json<{ key: string; value: string }>();
+  if (!key || value === undefined) return Response.json({ error: 'key, value 필수' }, { status: 400 });
+
+  await env.DB.prepare(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).bind(key, String(value)).run();
+
+  return Response.json({ success: true });
 }
 
 /**

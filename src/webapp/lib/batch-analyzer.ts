@@ -11,6 +11,7 @@
 
 import type { Env } from '../../types';
 import type { CustomerContext, MilestoneKey } from './customer-context';
+import { logApiCost } from './api-cost-logger';
 import {
 	TOOLS,
 	executeRecordMilestone,
@@ -107,7 +108,7 @@ function fmtMilestoneLine(
 	return `- ${label}: ${date}${ago}`;
 }
 
-function buildSystemPrompt(ctx: CustomerContext): string {
+function buildSystemPrompt(ctx: CustomerContext, echoScanMode = false): string {
 	const c = ctx.customer;
 	const customerName = c.customer_name ?? `미등록(talk_id=${c.talk_id})`;
 	const bookingId = c.booking_id ?? '없음';
@@ -141,9 +142,23 @@ function buildSystemPrompt(ctx: CustomerContext): string {
 	});
 	const aiHistBlock = aiHistLines.length > 0 ? aiHistLines.join('\n') : '(없음)';
 
+	const echoScanBlock = echoScanMode ? `
+## 🔔 Echo Scan 모드 (이 분석에만 적용)
+
+작가님이 고객 메시지에 직접 답장하신 후, milestone을 소급 확인하는 모드입니다.
+
+[DUPLICATE] 판정 기준 (엄격히 준수):
+- ✅ 허용: 위 "작가님 처리 히스토리"에 이 메시지의 처리 내용이 이미 있는 경우
+- ❌ 금지: 대화에 [작가] 답장이 있다는 이유만으로 판정
+
+이유: 작가님 답장 = 고객과의 대화 처리, milestone 기록 = 별개의 시스템 기록.
+대화에 [작가] 답장이 있어도 "작가님 처리 히스토리"에 기록이 없으면 milestone을 확인하고 기록하세요.
+
+` : '';
+
 	return `당신은 사진관 "마음껏스튜디오"의 AI 비서입니다.
 한 고객의 톡톡 대화 흐름을 보고, 새로 도착한 메시지들을 처리합니다.
-
+${echoScanBlock}
 ## 📌 판단 원칙 (가장 중요)
 
 본질 = milestone 처리 날짜와 시간 흐름
@@ -505,6 +520,7 @@ async function runTool(
 export async function analyzeWithAI(
 	env: Env,
 	context: CustomerContext,
+	options?: { echoScanMode?: boolean },
 ): Promise<BatchAnalysisResult> {
 	const talkId = context.customer.talk_id;
 	const targets = context.talk_history.filter((m) => m.is_target);
@@ -514,7 +530,7 @@ export async function analyzeWithAI(
 
 	const userMsgText = targets.map((m) => m.message_content ?? '').join('\n');
 
-	const systemPrompt = buildSystemPrompt(context);
+	const systemPrompt = buildSystemPrompt(context, options?.echoScanMode ?? false);
 
 	const messages: Array<{ role: 'user' | 'assistant'; content: any }> = [
 		{ role: 'user', content: userMsgText },
@@ -614,6 +630,17 @@ export async function analyzeWithAI(
 	}
 
 	const aiText = finalTextParts.join('\n').trim();
+
+	// 비용 로그 (fire-and-forget)
+	logApiCost({
+		env: env as unknown as { DB: D1Database },
+		operation: 'batch_analyze',
+		model: ANTHROPIC_MODEL,
+		inputTokens: totalInputTokens,
+		outputTokens: totalOutputTokens,
+		contextText: userMsgText,
+		talkId,
+	}).catch(() => {});
 
 	// 결과 분류
 	if (toolUsesLog.length > 0) {

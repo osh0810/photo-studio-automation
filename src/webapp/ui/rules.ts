@@ -283,6 +283,15 @@ export function renderRulesPage(userEmail: string): string {
       const linkReport = document.createElement('a');
       linkReport.href = '/report';
       linkReport.textContent = '📈 리포트';
+      const linkCost = document.createElement('a');
+      linkCost.href = '/cost';
+      linkCost.textContent = '💰 API 비용';
+      const linkMemos = document.createElement('a');
+      linkMemos.href = '/memos';
+      linkMemos.textContent = '📝 개발 메모';
+      const linkLinks = document.createElement('a');
+      linkLinks.href = '/links';
+      linkLinks.textContent = '🔗 링크 관리';
       const notifItem = buildNotifItem();
       const logoutBtn = document.createElement('button');
       logoutBtn.type = 'button';
@@ -298,6 +307,9 @@ export function renderRulesPage(userEmail: string): string {
       nav.appendChild(linkPhotos);
       nav.appendChild(linkRules);
       nav.appendChild(linkReport);
+      nav.appendChild(linkCost);
+      nav.appendChild(linkMemos);
+      nav.appendChild(linkLinks);
       nav.appendChild(notifItem);
       nav.appendChild(logoutBtn);
       sidebar.appendChild(nav);

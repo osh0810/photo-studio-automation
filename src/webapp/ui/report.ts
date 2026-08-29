@@ -270,6 +270,9 @@ export function renderReportPage(userEmail: string): string {
       nav.appendChild(mkLink('/photos', '🖼️ 사진 관리', false));
       nav.appendChild(mkLink('/rules', '📋 학습 규칙', false));
       nav.appendChild(mkLink('/report', '📈 리포트', true));
+      nav.appendChild(mkLink('/cost', '💰 API 비용', false));
+      nav.appendChild(mkLink('/memos', '📝 개발 메모', false));
+      nav.appendChild(mkLink('/links', '🔗 링크 관리', false));
       nav.appendChild(buildNotifItem());
       const logoutBtn = document.createElement('button');
       logoutBtn.type = 'button';

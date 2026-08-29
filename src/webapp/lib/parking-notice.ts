@@ -44,6 +44,13 @@ export interface DryRunResult {
 }
 
 export async function runParkingNotice(env: Env, dryRun = false): Promise<DryRunResult | void> {
+	// KST 기준 일요일(0)이면 발송 스킵
+	const kstNow = new Date(Date.now() + 9 * 60 * 60 * 1000);
+	if (!dryRun && kstNow.getUTCDay() === 0) {
+		console.log('[parking-notice] 일요일 — 발송 스킵');
+		return;
+	}
+
 	// 1. 오늘 KST 촬영 예약 조회 (shoot_date는 KST 저장 → '+9 hours' 변환 없이 비교)
 	const { results: bookings } = await env.DB.prepare(
 		`SELECT booking_id, customer_name, talk_id, shoot_date

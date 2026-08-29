@@ -497,7 +497,7 @@ export interface BookingRow {
 
 export function computeStage(b: BookingRow): string {
   if (b.frame_ordered_at) return 'S7';
-  if (b.revision_sent_at) return 'S6';
+  if (b.revision_sent_at && (!b.revision_requested_at || b.revision_sent_at >= b.revision_requested_at)) return 'S6';
   if (b.revision_no_more_at) return 'S5b';
   if (b.revision_requested_at) return 'S5a';
   if (b.retouched_sent_at) return 'S4';

@@ -37,6 +37,8 @@ import {
   buildOriginalSendMessage,
   buildRetouchedSendMessage,
 } from '../lib/drive-message-builder';
+import { logApiCost } from '../lib/api-cost-logger';
+import { analyzeMemo, saveMemos, type MemoItem } from './memo-api';
 import type {
   ChatMessage,
   ChatSendRequest,
@@ -53,6 +55,7 @@ interface Env {
   VAPID_PUBLIC_KEY?: string;
   VAPID_PRIVATE_KEY?: string;
   VAPID_SUBJECT?: string;
+  BASE_URL?: string;
   [key: string]: unknown;
 }
 
@@ -63,6 +66,20 @@ const AI_TIMEOUT_MS = 30_000;
 const HISTORY_LIMIT = 10;
 const DEFAULT_DAILY_LIMIT = 200;
 const MAX_TOOL_ROUNDS = 5;
+
+// 개발 메모 패턴 감지 (경량 엔드포인트 라우팅 트리거)
+const MEMO_PATTERNS = [
+  /개발\s*메모/,                              // "개발메모", "개발 메모 추가"
+  /메모\s*(추가|저장)/,                        // "메모 추가", "메모 저장"
+  /메모해줘|메모\s*해\s*줘/,
+  /좋을\s*것\s*같아/,                          // "하면 좋을 것 같아", "있으면 좋을 것 같아"
+  /기능\s*(추가|개선|수정)/,
+  /버그\s*(있|발견|수정)/,
+  /수정\s*(필요|해줘|해야)/,
+  /나중에.{0,20}(해야|추가|수정|개선|고쳐)/,
+  /개선\s*(필요|해줘|사항)/,
+  /추가해야|고쳐야|바꿔야/,
+];
 
 // 짧은 긍정/거부 응답 매칭 (reply_to 없을 때 컨텍스트 자동 추론용)
 const SHORT_AFFIRM = /^(네|넵|응|어|ㅇㅇ|ㅇㅋ|오케이|오키|ok|예|좋아요?|그래요?|진행(해(줘|주세요)?)?)[!.…~\s]*$/i;
@@ -897,7 +914,7 @@ async function processDriveLinkInMessage(env: Env, message: string): Promise<voi
   // Step 4: 보정본 폴더는 현장 추가 매칭 건너뛰고 바로 발송 문구 생성
   if (matchResult.booking && linkType === 'retouched') {
     try {
-      await buildRetouchedSendMessage(env.DB, matchResult.booking.booking_id, folderUrl);
+      await buildRetouchedSendMessage(env.DB, matchResult.booking.booking_id, folderUrl, env.BASE_URL);
     } catch (e) {
       console.error('[chat] buildRetouchedSendMessage 실패:', e);
     }
@@ -908,7 +925,7 @@ async function processDriveLinkInMessage(env: Env, message: string): Promise<voi
   if (matchResult.booking && linkType === 'original' && parsed.products.length === 0) {
     // 폴더에 상품 토큰이 아예 없으면 → 바로 원본 발송 문구
     try {
-      await buildOriginalSendMessage(env.DB, matchResult.booking.booking_id, folderUrl);
+      await buildOriginalSendMessage(env.DB, matchResult.booking.booking_id, folderUrl, env.BASE_URL);
     } catch (e) {
       console.error('[chat] buildOriginalSendMessage 실패:', e);
     }
@@ -1003,6 +1020,7 @@ async function processDriveLinkInMessage(env: Env, message: string): Promise<voi
             env.DB,
             matchResult.booking.booking_id,
             folderUrl,
+            env.BASE_URL,
           );
         } catch (e) {
           console.error('[chat] buildOriginalSendMessage 실패:', e);
@@ -1209,6 +1227,7 @@ export async function handleAIProcess(request: Request, env: Env): Promise<Respo
           env.DB,
           driveBookingId,
           driveLink || '',
+          env.BASE_URL,
         );
       } catch (e) {
         console.error('[chat] buildOriginalSendMessage 실패:', e);
@@ -1524,6 +1543,65 @@ export async function handleAIProcess(request: Request, env: Env): Promise<Respo
     return Response.json({ message: aiRow ? rowToMessage(aiRow) : null });
   }
 
+  // ── MEMO_CONFIRM_YES/NO ────────────────────────────────────────────────────
+  if (userText === '[MEMO_CONFIRM_YES]') {
+    const pending = await env.DB.prepare(
+      `SELECT id, metadata FROM ai_chat_messages
+       WHERE json_extract(metadata, '$.type') = 'memo_confirm_pending'
+       ORDER BY id DESC LIMIT 1`,
+    ).first<{ id: number; metadata: string }>();
+
+    let resultMessage = '';
+    if (!pending) {
+      resultMessage = '저장할 메모를 찾을 수 없습니다.';
+    } else {
+      let meta: { items?: MemoItem[]; raw_input?: string } = {};
+      try { meta = JSON.parse(pending.metadata); } catch (_) {}
+      const items = meta.items ?? [];
+      if (items.length === 0) {
+        resultMessage = '메모 항목이 없습니다.';
+      } else {
+        const ids = await saveMemos(env.DB, items, meta.raw_input ?? '');
+        await env.DB.prepare(
+          `UPDATE ai_chat_messages SET metadata = json_set(metadata, '$.type', 'memo_confirm_used') WHERE id = ?1`,
+        ).bind(pending.id).run();
+        resultMessage =
+          `✅ ${ids.length}개 개발 메모가 저장되었습니다.\n` +
+          items.map((item, i) => `${i + 1}. ${item.title}`).join('\n') +
+          `\n\n/memos 페이지에서 확인하실 수 있습니다.`;
+      }
+    }
+    const aiRow = await env.DB.prepare(
+      `INSERT INTO ai_chat_messages (sender, message, reply_to_id, metadata, created_at)
+       VALUES ('ai', ?1, ?2, ?3, datetime('now'))
+       RETURNING id, sender, message, reply_to_id, metadata, created_at`,
+    )
+      .bind(resultMessage, body.user_message_id, JSON.stringify({ kind: 'ai_call', source: 'memo_confirm_yes' }))
+      .first<any>();
+    return Response.json({ message: aiRow ? rowToMessage(aiRow) : null });
+  }
+
+  if (userText === '[MEMO_CONFIRM_NO]') {
+    const pending = await env.DB.prepare(
+      `SELECT id FROM ai_chat_messages
+       WHERE json_extract(metadata, '$.type') = 'memo_confirm_pending'
+       ORDER BY id DESC LIMIT 1`,
+    ).first<{ id: number }>();
+    if (pending) {
+      await env.DB.prepare(
+        `UPDATE ai_chat_messages SET metadata = json_set(metadata, '$.type', 'memo_confirm_used') WHERE id = ?1`,
+      ).bind(pending.id).run();
+    }
+    const aiRow = await env.DB.prepare(
+      `INSERT INTO ai_chat_messages (sender, message, reply_to_id, metadata, created_at)
+       VALUES ('ai', ?1, ?2, ?3, datetime('now'))
+       RETURNING id, sender, message, reply_to_id, metadata, created_at`,
+    )
+      .bind('취소되었습니다.', body.user_message_id, JSON.stringify({ kind: 'ai_call', source: 'memo_confirm_no' }))
+      .first<any>();
+    return Response.json({ message: aiRow ? rowToMessage(aiRow) : null });
+  }
+
   const replyToContext: ChatMessage | null = userRow.r_id
     ? rowToMessage({
         id: userRow.r_id,
@@ -1534,6 +1612,211 @@ export async function handleAIProcess(request: Request, env: Env): Promise<Respo
         created_at: userRow.r_created_at,
       })
     : null;
+
+  // ── 개발 메모 감지 (경량 AI 라우팅) ─────────────────────────────────────────
+  if (userText && !userText.startsWith('[')) {
+    const replyMeta = replyToContext?.metadata as Record<string, any> | null;
+    const isReplyToMemoConfirm = replyMeta?.type === 'memo_confirm_pending';
+    const hasMemoPattern = MEMO_PATTERNS.some((p) => p.test(userText));
+
+    // memo_confirm_pending 컨텍스트 조회
+    // reply_to가 pending을 가리키거나, 없으면 직전 pending AI 메시지 검색
+    const isAffirmOrDeny = SHORT_AFFIRM.test(userText.trim()) || SHORT_DENY.test(userText.trim());
+    let pendingMeta: Record<string, any> | null = null;
+    let pendingMsgId: number | null = null;
+
+    if (isReplyToMemoConfirm) {
+      pendingMeta = replyMeta;
+      pendingMsgId = replyToContext!.id;
+    } else {
+      // 긍정/거부뿐 아니라 수정 요청도 잡기 위해 항상 직전 pending 조회
+      const prevPending = await env.DB.prepare(
+        `SELECT id, metadata FROM ai_chat_messages
+         WHERE id < ?1 AND sender = 'ai'
+         AND json_extract(metadata, '$.type') = 'memo_confirm_pending'
+         ORDER BY id DESC LIMIT 1`,
+      ).bind(body.user_message_id).first<{ id: number; metadata: string }>();
+      if (prevPending) {
+        try { pendingMeta = JSON.parse(prevPending.metadata); } catch (_) {}
+        pendingMsgId = prevPending.id;
+      }
+    }
+
+    // Case 1: 긍정 → 저장
+    if (pendingMeta && pendingMsgId && SHORT_AFFIRM.test(userText.trim())) {
+      const items: MemoItem[] = pendingMeta.items ?? [];
+      let resultMessage = '';
+      if (items.length === 0) {
+        resultMessage = '저장할 메모 항목이 없습니다.';
+      } else {
+        const ids = await saveMemos(env.DB, items, pendingMeta.raw_input ?? '');
+        await env.DB.prepare(
+          `UPDATE ai_chat_messages SET metadata = json_set(metadata, '$.type', 'memo_confirm_used') WHERE id = ?1`,
+        ).bind(pendingMsgId).run();
+        resultMessage =
+          `✅ ${ids.length}개 개발 메모가 저장되었습니다.\n` +
+          items.map((item: MemoItem, i: number) => `${i + 1}. ${item.title}`).join('\n') +
+          `\n\n/memos 페이지에서 확인하실 수 있습니다.`;
+      }
+      const aiRow = await env.DB.prepare(
+        `INSERT INTO ai_chat_messages (sender, message, reply_to_id, metadata, created_at)
+         VALUES ('ai', ?1, ?2, ?3, datetime('now'))
+         RETURNING id, sender, message, reply_to_id, metadata, created_at`,
+      )
+        .bind(resultMessage, body.user_message_id, JSON.stringify({ kind: 'ai_call', source: 'memo_confirm_yes' }))
+        .first<any>();
+      return Response.json({ message: aiRow ? rowToMessage(aiRow) : null });
+    }
+
+    // Case 2: 거부 → 취소
+    if (pendingMeta && pendingMsgId && SHORT_DENY.test(userText.trim())) {
+      await env.DB.prepare(
+        `UPDATE ai_chat_messages SET metadata = json_set(metadata, '$.type', 'memo_confirm_used') WHERE id = ?1`,
+      ).bind(pendingMsgId).run();
+      const aiRow = await env.DB.prepare(
+        `INSERT INTO ai_chat_messages (sender, message, reply_to_id, metadata, created_at)
+         VALUES ('ai', ?1, ?2, ?3, datetime('now'))
+         RETURNING id, sender, message, reply_to_id, metadata, created_at`,
+      )
+        .bind('취소되었습니다.', body.user_message_id, JSON.stringify({ kind: 'ai_call', source: 'memo_confirm_no' }))
+        .first<any>();
+      return Response.json({ message: aiRow ? rowToMessage(aiRow) : null });
+    }
+
+    // Case 3: pending이 있는데 긍정/거부도 아닌 경우 → 수정 요청으로 재분석
+    if (pendingMeta && pendingMsgId && !isAffirmOrDeny && !hasMemoPattern) {
+      const originalInput = pendingMeta.raw_input ?? '';
+      const correctionContext = originalInput
+        ? `원래 요청:\n${originalInput}\n\n수정 사항:\n${userText}`
+        : userText;
+
+      const correctedResult = await analyzeMemo(correctionContext, env.ANTHROPIC_API_KEY);
+      if (correctedResult.usage) {
+        logApiCost({
+          env,
+          operation: 'memo_analyze',
+          model: ANTHROPIC_MODEL,
+          inputTokens: correctedResult.usage.input_tokens,
+          outputTokens: correctedResult.usage.output_tokens,
+          contextText: correctionContext,
+        }).catch(() => {});
+      }
+      if (correctedResult.is_memo) {
+        await env.DB.prepare(
+          `UPDATE ai_chat_messages SET metadata = json_set(metadata, '$.type', 'memo_confirm_used') WHERE id = ?1`,
+        ).bind(pendingMsgId).run();
+
+        const PRIORITY_LABEL: Record<string, string> = { urgent: '🔴 긴급', normal: '🟡 보통', low: '🔵 낮음' };
+        const itemList = correctedResult.items
+          .map((item, i) => `${i + 1}. **${item.title}** (${PRIORITY_LABEL[item.priority] ?? '🟡 보통'})\n   ${item.body}`)
+          .join('\n');
+
+        const aiRow = await env.DB.prepare(
+          `INSERT INTO ai_chat_messages (sender, message, reply_to_id, metadata, created_at)
+           VALUES ('ai', ?1, ?2, ?3, datetime('now'))
+           RETURNING id, sender, message, reply_to_id, metadata, created_at`,
+        )
+          .bind(
+            `수정해서 다시 정리했어요.\n\n${itemList}`,
+            body.user_message_id,
+            JSON.stringify({
+              kind: 'ai_call',
+              source: 'memo_analyze',
+              type: 'memo_confirm_pending',
+              items: correctedResult.items,
+              raw_input: correctionContext,
+              buttons: [
+                { label: '✅ 저장', value: '[MEMO_CONFIRM_YES]' },
+                { label: '❌ 취소', value: '[MEMO_CONFIRM_NO]' },
+              ],
+            }),
+          )
+          .first<any>();
+        return Response.json({ message: aiRow ? rowToMessage(aiRow) : null });
+      }
+      // is_memo: false → 수정 요청이 아님, 풀 AI로 fall-through
+    }
+
+    if (hasMemoPattern || isReplyToMemoConfirm) {
+      // 마지막 메모 저장/취소 이벤트 이후의 사용자 메시지만 컨텍스트로 사용
+      // (이미 처리된 이전 메모 내용이 새 정리에 포함되는 것 방지)
+      const lastMemoEvent = await env.DB.prepare(
+        `SELECT MAX(id) AS last_id FROM ai_chat_messages
+         WHERE sender = 'ai'
+         AND json_extract(metadata, '$.source') IN ('memo_confirm_yes', 'memo_confirm_no')
+         AND id < ?1`,
+      ).bind(body.user_message_id).first<{ last_id: number | null }>();
+
+      const afterId = lastMemoEvent?.last_id ?? 0;
+
+      const recentUserRows = await env.DB.prepare(
+        `SELECT message FROM ai_chat_messages
+         WHERE id < ?1 AND id > ?2 AND sender = 'user'
+         ORDER BY id DESC LIMIT 4`,
+      ).bind(body.user_message_id, afterId).all<{ message: string }>();
+
+      const contextPrefix = (recentUserRows.results || [])
+        .reverse()
+        .map((r) => `[작가님]: ${r.message}`)
+        .join('\n');
+
+      const textForAnalysis = contextPrefix
+        ? `${contextPrefix}\n[작가님]: ${userText}`
+        : userText;
+
+      const memoResult = await analyzeMemo(textForAnalysis, env.ANTHROPIC_API_KEY);
+      if (memoResult.usage) {
+        logApiCost({
+          env,
+          operation: 'memo_analyze',
+          model: ANTHROPIC_MODEL,
+          inputTokens: memoResult.usage.input_tokens,
+          outputTokens: memoResult.usage.output_tokens,
+          contextText: userText,
+        }).catch(() => {});
+      }
+
+      if (memoResult.is_memo) {
+        const PRIORITY_LABEL: Record<string, string> = {
+          urgent: '🔴 긴급',
+          normal: '🟡 보통',
+          low: '🔵 낮음',
+        };
+        const itemList = memoResult.items
+          .map((item, i) => {
+            const pLabel = PRIORITY_LABEL[item.priority] ?? '🟡 보통';
+            return `${i + 1}. **${item.title}** (${pLabel})\n   ${item.body}`;
+          })
+          .join('\n');
+
+        const confirmText = `개발 메모로 저장할까요?\n\n${itemList}`;
+
+        const aiRow = await env.DB.prepare(
+          `INSERT INTO ai_chat_messages (sender, message, reply_to_id, metadata, created_at)
+           VALUES ('ai', ?1, ?2, ?3, datetime('now'))
+           RETURNING id, sender, message, reply_to_id, metadata, created_at`,
+        )
+          .bind(
+            confirmText,
+            body.user_message_id,
+            JSON.stringify({
+              kind: 'ai_call',
+              source: 'memo_analyze',
+              type: 'memo_confirm_pending',
+              items: memoResult.items,
+              raw_input: userText,
+              buttons: [
+                { label: '✅ 저장', value: '[MEMO_CONFIRM_YES]' },
+                { label: '❌ 취소', value: '[MEMO_CONFIRM_NO]' },
+              ],
+            }),
+          )
+          .first<any>();
+        return Response.json({ message: aiRow ? rowToMessage(aiRow) : null });
+      }
+      // is_memo: false → fall-through to full AI processing
+    }
+  }
 
   // ── Phase 7: 사진 캡션 자동감지 ────────────────────────────────────────────
   // sentinel이 아닌 일반 텍스트일 때만 캡션으로 처리
@@ -1630,12 +1913,31 @@ export async function handleAIProcess(request: Request, env: Env): Promise<Respo
     return { role, content: text };
   });
 
-  // reply_to가 있으면 system 프롬프트 뒤에 참조 블록으로 주입
+  // reply_to가 있으면 messages 배열의 마지막 user 메시지에 직접 컨텍스트 주입
+  // (system prompt 주입만으로는 최근 대화 히스토리에 밀려 AI가 무시하기 때문)
+  if (replyToContext && messages.length > 0) {
+    const last = messages[messages.length - 1];
+    if (last.role === 'user' && typeof last.content === 'string') {
+      const replyHeader =
+        `[답장 대상 메시지 — 반드시 이 내용의 고객을 기준으로 처리하세요. 최근 대화의 다른 고객과 혼동 금지]\n` +
+        `발신: ${replyToContext.sender}\n` +
+        `내용: ${replyToContext.message}\n\n` +
+        `[작가님 메시지]\n`;
+      messages[messages.length - 1] = { role: 'user', content: replyHeader + last.content };
+    }
+  }
+
+  // reply_to가 있으면 system 프롬프트에도 참조 블록 추가 (이중 보강)
   let systemPrompt = SYSTEM_PROMPT;
   if (replyToContext) {
     systemPrompt +=
-      `\n\n## 현재 작가님 메시지가 답장하는 메시지\n` +
-      `(sender=${replyToContext.sender}) ${replyToContext.message}`;
+      `\n\n## 🚨 최우선 지시: 작가님이 특정 메시지에 직접 답장했습니다\n\n` +
+      `작가님의 현재 메시지는 아래 메시지에 대한 **직접 답장**입니다.\n` +
+      `반드시 아래 메시지의 내용/고객을 처리 기준으로 삼으세요.\n` +
+      `최근 대화내용에 다른 고객 정보가 있더라도 절대 혼동하지 마세요.\n\n` +
+      `[발신: ${replyToContext.sender}]\n${replyToContext.message}\n\n` +
+      `⚠️ 위 답장 대상 메시지의 고객/내용 기준으로만 처리하세요. 다른 고객 정보는 무시하세요.\n` +
+      `⚠️ talk_id는 booking_id가 아닙니다. 고객명으로 search_customers를 먼저 호출해 booking_id를 확보하세요.`;
   } else {
     // reply_to_id가 없을 때: 짧은 긍정/거부 응답이면 직전 AI 메시지를 자동 컨텍스트화
     const userText = String(userRow.message || '').trim();
@@ -1821,6 +2123,16 @@ export async function handleAIProcess(request: Request, env: Env): Promise<Respo
   console.log(
     `[chat] AI 완료 (tokens=${totalTokens}, duration=${duration}ms, stop_reason=${lastStopReason}, tool_calls=${toolCallsLog.length})`,
   );
+
+  // 비용 로그 (fire-and-forget)
+  logApiCost({
+    env,
+    operation: 'chat_reply',
+    model: ANTHROPIC_MODEL,
+    inputTokens: totalInputTokens,
+    outputTokens: totalOutputTokens,
+    contextText: userText,
+  }).catch(() => {});
 
   // 7. metadata 구성 + INSERT
   const metadata: Record<string, any> = {

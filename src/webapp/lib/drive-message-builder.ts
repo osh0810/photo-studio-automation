@@ -8,6 +8,20 @@
  * has_placeholders=true로 metadata에 표시 → UI에서 노란 경고 표시.
  */
 
+import { createProxyToken } from './proxy-link';
+
+async function getProxySettings(db: D1Database): Promise<{ enabled: boolean; expiryDays: number }> {
+	const rows = await db.prepare(
+		`SELECT key, value FROM app_settings WHERE key IN ('proxy_link_enabled', 'proxy_link_expires_days')`,
+	).all<{ key: string; value: string }>();
+	const map: Record<string, string> = {};
+	for (const r of rows.results ?? []) map[r.key] = r.value;
+	return {
+		enabled: map['proxy_link_enabled'] !== 'false',
+		expiryDays: parseInt(map['proxy_link_expires_days'] ?? '60', 10) || 60,
+	};
+}
+
 interface BookingRow {
 	booking_id: string;
 	customer_name: string | null;
@@ -191,14 +205,21 @@ export async function buildOriginalSendMessage(
 	db: D1Database,
 	bookingId: string,
 	driveLink: string,
+	baseUrl?: string,
 ): Promise<void> {
 	const ctx = await gatherContext(db, bookingId);
-	const body = originalTemplate(ctx, driveLink || '{Drive링크}');
+	const { enabled, expiryDays } = await getProxySettings(db);
+	const useProxy = enabled && baseUrl && driveLink;
+	const linkToUse = useProxy
+		? await createProxyToken(db, driveLink, bookingId, 'original', expiryDays, baseUrl!)
+		: driveLink || '{Drive링크}';
+	const body = originalTemplate(ctx, linkToUse);
 	await insertSendMessage(db, body, {
 		type: 'drive_send_message',
 		send_type: 'original',
 		booking_id: bookingId,
 		drive_link: driveLink,
+		proxy_link: useProxy ? linkToUse : undefined,
 		total_retouch: ctx.total_retouch,
 		total_frame: ctx.total_frame,
 		has_placeholders: ctx.has_placeholders,
@@ -209,14 +230,21 @@ export async function buildRetouchedSendMessage(
 	db: D1Database,
 	bookingId: string,
 	driveLink: string,
+	baseUrl?: string,
 ): Promise<void> {
 	const ctx = await gatherContext(db, bookingId);
-	const body = retouchedTemplate(ctx, driveLink || '{Drive링크}');
+	const { enabled, expiryDays } = await getProxySettings(db);
+	const useProxy = enabled && baseUrl && driveLink;
+	const linkToUse = useProxy
+		? await createProxyToken(db, driveLink, bookingId, 'retouched', expiryDays, baseUrl!)
+		: driveLink || '{Drive링크}';
+	const body = retouchedTemplate(ctx, linkToUse);
 	await insertSendMessage(db, body, {
 		type: 'drive_send_message',
 		send_type: 'retouched',
 		booking_id: bookingId,
 		drive_link: driveLink,
+		proxy_link: useProxy ? linkToUse : undefined,
 		total_retouch: ctx.total_retouch,
 		total_frame: ctx.total_frame,
 		has_placeholders: ctx.has_placeholders,

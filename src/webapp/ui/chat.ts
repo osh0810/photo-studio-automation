@@ -665,6 +665,14 @@ export function renderChatPage(userEmail: string): string {
     .modal-field input[readonly] { background: var(--bg); color: #888; cursor: default; }
     .modal-money-row { display: flex; gap: 8px; }
     .modal-money-row .modal-field { flex: 1; margin-bottom: 0; }
+    .modal-talk-dropdown { max-height: 220px; }
+    .modal-talk-section { padding: 6px 12px 2px; font-size: 11px; font-weight: 600; color: #aaa; text-transform: uppercase; letter-spacing: 0.05em; }
+    .modal-talk-item { padding: 8px 12px; cursor: pointer; font-size: 13px; border-top: 1px solid var(--border); }
+    .modal-talk-item:hover { background: var(--bg-soft); }
+    .modal-talk-item-main { font-weight: 500; }
+    .modal-talk-item-sub { font-size: 11px; color: #888; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .modal-talk-selected { font-size: 12px; color: var(--accent); margin-top: 4px; padding: 4px 8px; background: var(--bg-soft); border-radius: 6px; display: flex; align-items: center; justify-content: space-between; }
+    .modal-talk-clear { cursor: pointer; font-size: 14px; color: #aaa; padding: 0 2px; }
 
     /* ─── 사진 말풍선 ─── */
     .photo-grid {
@@ -948,6 +956,14 @@ export function renderChatPage(userEmail: string): string {
         <button type="button" class="modal-close" id="booking-modal-close">✕</button>
       </div>
       <div id="booking-modal-error" class="modal-error" style="display:none"></div>
+      <div class="modal-field">
+        <label>톡톡 연결 <span style="font-weight:400;color:#888;font-size:12px">(선택사항 — 이름·전화번호·대화내용 검색)</span></label>
+        <div class="modal-autocomplete-wrap">
+          <input type="text" id="bm-talk-search" placeholder="예: 홍길동 / 010-1234 / 색감 얘기한 분" autocomplete="off">
+          <div id="bm-talk-dropdown" class="modal-autocomplete-dropdown modal-talk-dropdown" style="display:none"></div>
+        </div>
+        <div id="bm-talk-selected" style="display:none"></div>
+      </div>
       <div class="modal-field">
         <label>고객명 <span style="color:#ef4444">*</span></label>
         <input type="text" id="bm-name" placeholder="홍길동" autocomplete="off">
@@ -1915,9 +1931,102 @@ export function renderChatPage(userEmail: string): string {
       el.addEventListener('blur', () => { const n = parseMoney(el.value); el.value = n ? fmtMoney(n) : ''; updateBalance(); });
     });
 
+    // ── 톡톡 선택 로직 ──
+    let bmSelectedTalkId = null;
+    let bmTalkTimer = null;
+    const $talkSearch = document.getElementById('bm-talk-search');
+    const $talkDropdown = document.getElementById('bm-talk-dropdown');
+    const $talkSelected = document.getElementById('bm-talk-selected');
+
+    function bmTalkEsc(s) { return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    function clearTalkSelection() {
+      bmSelectedTalkId = null;
+      $talkSearch.value = '';
+      $talkSelected.style.display = 'none';
+      $talkSelected.innerHTML = '';
+    }
+
+    function selectTalk(talkId, label, name, phone) {
+      bmSelectedTalkId = talkId;
+      $talkDropdown.style.display = 'none';
+      $talkSearch.value = '';
+      $talkSelected.style.display = 'block';
+      $talkSelected.innerHTML =
+        '<div class="modal-talk-selected">' +
+        '<span>✓ ' + bmTalkEsc(label) + '</span>' +
+        '<span class="modal-talk-clear" id="bm-talk-clear">✕</span>' +
+        '</div>';
+      document.getElementById('bm-talk-clear').addEventListener('click', clearTalkSelection);
+      if (name) document.getElementById('bm-name').value = name;
+      if (phone) document.getElementById('bm-phone').value = phone;
+    }
+
+    function renderTalkDropdown(customers, talkOnly) {
+      if (!customers.length && !talkOnly.length) {
+        $talkDropdown.innerHTML = '<div style="padding:10px 12px;font-size:13px;color:#aaa">검색 결과 없음</div>';
+        $talkDropdown.style.display = 'block';
+        return;
+      }
+      let html = '';
+      if (customers.length) {
+        html += '<div class="modal-talk-section">📋 기존 고객</div>';
+        customers.forEach(c => {
+          const sub = c.phone ? c.phone : '전화번호 없음';
+          html += '<div class="modal-talk-item" data-type="customer" data-talk-id="' + bmTalkEsc(c.talk_id) +
+            '" data-name="' + bmTalkEsc(c.customer_name) + '" data-phone="' + bmTalkEsc(c.phone || '') + '">' +
+            '<div class="modal-talk-item-main">' + bmTalkEsc(c.customer_name) + '</div>' +
+            '<div class="modal-talk-item-sub">' + bmTalkEsc(sub) + '</div>' +
+            '</div>';
+        });
+      }
+      if (talkOnly.length) {
+        html += '<div class="modal-talk-section">💬 톡톡 대화만 있는 고객</div>';
+        talkOnly.forEach(t => {
+          const date = t.last_message_at ? t.last_message_at.slice(0, 10) : '';
+          const preview = (t.matched_message || t.last_message || '').slice(0, 40);
+          html += '<div class="modal-talk-item" data-type="talk" data-talk-id="' + bmTalkEsc(t.talk_id) + '">' +
+            '<div class="modal-talk-item-main">' + bmTalkEsc(date ? date + ' 대화' : '미상') + '</div>' +
+            '<div class="modal-talk-item-sub">' + bmTalkEsc(preview) + '</div>' +
+            '</div>';
+        });
+      }
+      $talkDropdown.innerHTML = html;
+      $talkDropdown.style.display = 'block';
+      $talkDropdown.querySelectorAll('.modal-talk-item').forEach(el => {
+        el.addEventListener('click', () => {
+          const type = el.dataset.type;
+          const talkId = el.dataset.talkId;
+          if (type === 'customer') {
+            const name = el.dataset.name;
+            const phone = el.dataset.phone;
+            selectTalk(talkId, name + (phone ? ' ' + phone : ''), name, phone);
+          } else {
+            const sub = el.querySelector('.modal-talk-item-sub').textContent;
+            selectTalk(talkId, '톡톡: ' + sub.slice(0, 20) + '…', null, null);
+          }
+        });
+      });
+    }
+
+    $talkSearch.addEventListener('input', () => {
+      const q = $talkSearch.value.trim();
+      if (!q) { $talkDropdown.style.display = 'none'; return; }
+      clearTimeout(bmTalkTimer);
+      bmTalkTimer = setTimeout(async () => {
+        try {
+          const res = await api('GET', '/api/talk-contacts?q=' + encodeURIComponent(q));
+          renderTalkDropdown(res.customers || [], res.talkOnly || []);
+        } catch { $talkDropdown.style.display = 'none'; }
+      }, 300);
+    });
+
+    $talkSearch.addEventListener('blur', () => { setTimeout(() => { $talkDropdown.style.display = 'none'; }, 200); });
+
     function openBookingModal() {
       bmSelectedProducts = [];
       renderProductTags();
+      clearTalkSelection();
       ['bm-name','bm-phone','bm-product-name','bm-note','bm-amount','bm-deposit','bm-balance'].forEach(id => { document.getElementById(id).value = ''; });
       document.getElementById('bm-channel').value = '';
       document.getElementById('bm-payment').value = '현장결제';
@@ -2013,6 +2122,7 @@ export function renderChatPage(userEmail: string): string {
         const body = {
           customer_name: name,
           phone: document.getElementById('bm-phone').value.trim() || undefined,
+          talk_id: bmSelectedTalkId || undefined,
           consultation_channel: document.getElementById('bm-channel').value || undefined,
           payment_method: document.getElementById('bm-payment').value || undefined,
           shoot_date,
@@ -2173,9 +2283,10 @@ export function renderChatPage(userEmail: string): string {
             if (x.cancelled) return '취소';
             if (x.frame_ordered_at) return '액자발주완료';
             if (x.revision_no_more_at) return '추가보정없음';
-            if (x.revision_sent_at && x.revision_requested_at) {
-              if (x.revision_sent_at > x.revision_requested_at) return '재보정완료';
-              if (x.revision_sent_at < x.revision_requested_at) return '재보정요청';
+            if (x.revision_requested_at) {
+              if (!x.revision_sent_at) return '재보정요청';
+              if (x.revision_sent_at >= x.revision_requested_at) return '재보정완료';
+              return '재보정요청';
             }
             if (x.retouched_sent_at) return '보정완료';
             if (x.selection_received_at) return '셀렉완료';
@@ -2431,6 +2542,20 @@ export function renderChatPage(userEmail: string): string {
       }
       const footer = el('div', { class: 'msg-system-footer' });
       footer.appendChild(el('span', { class: 'time-text' }, time));
+      const replyBtn = el('button', {
+        type: 'button',
+        class: 'copy-btn',
+        title: '답장',
+        'aria-label': '답장',
+        onclick: (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          state.replyTo = { id: m.id, sender: m.sender, message: m.message };
+          updateReplyBar();
+          $input.focus();
+        },
+      }, '↩');
+      footer.appendChild(replyBtn);
       const copyBtn = el('button', {
         type: 'button',
         class: 'copy-btn',
@@ -2715,6 +2840,8 @@ export function renderChatPage(userEmail: string): string {
       '[PHOTO_LINK_SELECT_3]': '3번',
       '[PHOTO_LINK_SELECT_4]': '4번',
       '[PHOTO_LINK_SELECT_5]': '5번',
+      '[MEMO_CONFIRM_YES]': '✅ 저장',
+      '[MEMO_CONFIRM_NO]': '❌ 취소',
     };
 
     function renderUserAiMessage(m) {
@@ -2870,7 +2997,12 @@ export function renderChatPage(userEmail: string): string {
       bubble.addEventListener('touchstart', (e) => {
         const t = e.touches[0];
         touchTimer = setTimeout(() => {
-          openCtxMenu(t.clientX, t.clientY, m);
+          if (m.sender === 'user') {
+            const rect = bubble.getBoundingClientRect();
+            openCtxMenu(rect.right, rect.bottom + 6, m);
+          } else {
+            openCtxMenu(t.clientX, t.clientY, m);
+          }
         }, 500);
       }, { passive: true });
       bubble.addEventListener('touchend', () => {
@@ -3085,6 +3217,9 @@ export function renderChatPage(userEmail: string): string {
       const linkPhotos = el('a', { href: '/photos' }, '🖼️ 사진 관리');
       const linkRules = el('a', { href: '/rules' }, '📋 학습 규칙');
       const linkReport = el('a', { href: '/report' }, '📈 리포트');
+      const linkCost = el('a', { href: '/cost' }, '💰 API 비용');
+      const linkMemos = el('a', { href: '/memos' }, '📝 개발 메모');
+      const linkLinks = el('a', { href: '/links' }, '🔗 링크 관리');
 
       let notifItem;
       const onActivate = async (ev) => {
@@ -3126,6 +3261,9 @@ export function renderChatPage(userEmail: string): string {
       nav.appendChild(linkPhotos);
       nav.appendChild(linkRules);
       nav.appendChild(linkReport);
+      nav.appendChild(linkCost);
+      nav.appendChild(linkMemos);
+      nav.appendChild(linkLinks);
       nav.appendChild(notifItem);
       nav.appendChild(logoutBtn);
       sidebar.appendChild(nav);

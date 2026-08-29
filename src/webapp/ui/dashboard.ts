@@ -589,13 +589,16 @@ export function renderDashboardPage(userEmail: string): string {
       const linkPhotos = document.createElement('a'); linkPhotos.href='/photos'; linkPhotos.textContent='🖼️ 사진 관리';
       const linkRules = document.createElement('a'); linkRules.href='/rules'; linkRules.textContent='📋 학습 규칙';
       const linkReport = document.createElement('a'); linkReport.href='/report'; linkReport.textContent='📈 리포트';
+      const linkCost = document.createElement('a'); linkCost.href='/cost'; linkCost.textContent='💰 API 비용';
+      const linkMemos = document.createElement('a'); linkMemos.href='/memos'; linkMemos.textContent='📝 개발 메모';
+      const linkLinks = document.createElement('a'); linkLinks.href='/links'; linkLinks.textContent='🔗 링크 관리';
       const notifItem = buildNotifItem();
       const logoutBtn = document.createElement('button'); logoutBtn.type='button'; logoutBtn.className='nav-item'; logoutBtn.textContent='🚪 로그아웃';
       logoutBtn.addEventListener('click', async () => {
         try { await fetch('/auth/logout', { method: 'POST' }); } catch (_) {}
         location.href = '/login';
       });
-      [linkChat, linkDash, linkUpload, linkPhotos, linkRules, linkReport, notifItem, logoutBtn].forEach(el => nav.appendChild(el));
+      [linkChat, linkDash, linkUpload, linkPhotos, linkRules, linkReport, linkCost, linkMemos, linkLinks, notifItem, logoutBtn].forEach(el => nav.appendChild(el));
       sidebar.appendChild(nav);
       const emailDiv = document.createElement('div'); emailDiv.className='user-email'; emailDiv.textContent=USER_EMAIL; sidebar.appendChild(emailDiv);
       document.body.appendChild(overlay); document.body.appendChild(sidebar);

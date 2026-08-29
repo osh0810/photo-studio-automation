@@ -35,7 +35,8 @@
 		"NAVER_BIZ_ID": "745146",
 		"CALENDAR_ID": "vmfrmunobhhvrb1v6cg8u7j1p4@group.calendar.google.com",
 		"TIMEZONE": "Asia/Seoul",
-		"GOOGLE_DRIVE_PHOTOS_FOLDER_ID": "1IlKSdSHsby8fnhTS6LmdNnOnunk9GaYz"
+		"GOOGLE_DRIVE_PHOTOS_FOLDER_ID": "1IlKSdSHsby8fnhTS6LmdNnOnunk9GaYz",
+		"BASE_URL": "https://studio-task-safeguard.koreakyw0822.workers.dev"
 	},
 	"d1_databases": [
 		{

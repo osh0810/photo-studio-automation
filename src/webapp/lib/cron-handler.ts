@@ -444,7 +444,7 @@ async function scanDoneEchoForMilestones(env: CronEnv): Promise<void> {
 
 		try {
 			const context = await loadCustomerContext(env as unknown as Env, talkId, ids);
-			const result = await analyzeWithAI(env as unknown as Env, context);
+			const result = await analyzeWithAI(env as unknown as Env, context, { echoScanMode: true });
 
 			if (result.type === 'auto_processed') {
 				console.log(

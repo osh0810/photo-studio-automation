@@ -20,10 +20,8 @@ import {
 import { sendPushNotification } from './push-sender';
 import {
 	buildConfirmMessage,
-	matchAdditionalQuestions,
-	buildAdditionalQuestionMessage,
+	buildAdditionalQuestionMessageFromProducts,
 	type BookingDetailWithProduct,
-	type AdditionalQuestion,
 } from './confirm-message-builder';
 import {
 	createCalendarEventForBooking,
@@ -404,7 +402,7 @@ async function processConfirmEmail(
 		`SELECT
 		   bd.match_status, bd.raw_text,
 		   bd.product_id,
-		   p.product_name, p.match_keyword,
+		   p.product_name, p.match_keyword, p.additional_question_text,
 		   COALESCE(p.retouch_count, 0) AS retouch_count,
 		   p.retouch_breakdown,
 		   COALESCE(p.frame_count, 0) AS frame_count,
@@ -441,32 +439,20 @@ async function processConfirmEmail(
 		`[email-processor] 확정문자 생성 booking_id=${parsed.booking_id} details=${details.length}`,
 	);
 
-	// 3. 추가질문 매칭 + system 메시지 INSERT (있으면)
-	const questionsResult = await env.DB.prepare(
-		`SELECT question_id, question_code, trigger_keyword, question_text
-		 FROM additional_questions
-		 WHERE is_active = 1`,
-	).all<AdditionalQuestion>();
-	const matchedQuestions = matchAdditionalQuestions(
-		details,
-		(questionsResult.results || []) as AdditionalQuestion[],
-	);
-	if (matchedQuestions.length > 0) {
-		const questionMessage = buildAdditionalQuestionMessage(matchedQuestions);
-		if (questionMessage) {
-			await insertSystemMessage(env, {
-				title: '',
-				body: questionMessage,
-				metadata: {
-					source: 'naver_email',
-					type: 'additional_questions',
-					booking_id: parsed.booking_id,
-					matched_codes: matchedQuestions.map((q) => q.question_code),
-				},
-			});
-		}
+	// 3. 추가질문 메시지 생성 + system 메시지 INSERT (있으면)
+	const questionMessage = buildAdditionalQuestionMessageFromProducts(details);
+	if (questionMessage) {
+		await insertSystemMessage(env, {
+			title: '',
+			body: questionMessage,
+			metadata: {
+				source: 'naver_email',
+				type: 'additional_questions',
+				booking_id: parsed.booking_id,
+			},
+		});
 		console.log(
-			`[email-processor] 추가질문 매칭 booking_id=${parsed.booking_id} questions=${matchedQuestions.length} (codes: ${matchedQuestions.map((q) => q.question_code).join(',')})`,
+			`[email-processor] 추가질문 생성 booking_id=${parsed.booking_id}`,
 		);
 	}
 

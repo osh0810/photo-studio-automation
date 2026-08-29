@@ -22,9 +22,6 @@ import {
 } from "../lib/alerts";
 import { isDuplicate, markProcessed } from "../lib/dedup";
 import {
-	backupWebhookPayload,
-	CriticalBackupError,
-	updateBackupStatus,
 	type RawWebhookPayload,
 } from "../services/backup";
 import {
@@ -223,9 +220,10 @@ export async function handleWebhook(
 	}
 
 	const messageId = String(payload.messageId ?? "");
+	const dedupKey = messageId && payload.user ? `${payload.user}:${messageId}` : messageId;
 
 	// 2. dedup
-	if (messageId && isDuplicate(messageId)) {
+	if (dedupKey && isDuplicate(dedupKey)) {
 		console.warn(`[webhook] 중복 messageId 스킵 messageId=${messageId}`);
 		return new Response("duplicate", { status: 200 });
 	}
@@ -257,26 +255,16 @@ export async function handleWebhook(
 		console.error("[webhook] D1 INSERT 실패:", d1Err);
 	}
 
-	// 3.5. 백업 (시트) — D1 이후 실행. 실패해도 D1은 이미 저장됐으므로 early return 없음
-	let backupRow: { rowNumber: number } = { rowNumber: 0 };
-	try {
-		backupRow = await backupWebhookPayload(env, payload);
-		console.log(`[webhook] 시트 append OK rowNumber=${backupRow.rowNumber}`);
-	} catch (err) {
-		console.error("[webhook] 백업 실패 (D1은 저장됨):", err);
-		const stage = err instanceof CriticalBackupError ? "_원본백업 저장 (CRITICAL)" : "_원본백업 저장";
-		const { title, content } = formatErrorAlert(stage, err, payload);
-		await safeSendPush(env, title, content, 'webhook-backup-error');
-		// early return 제거 — 계속 진행
-	}
+	// 3.5. _원본백업 시트 백업 비활성화 — D1에 raw_payload 포함 전체 저장 중
+	const backupRow: { rowNumber: number } = { rowNumber: 0 };
 
 	// 4-a. echo 이벤트는 별도 분기 — 사장님이 보낸 메시지가 되돌아온 것이라
 	// classifier / Discord PROCESSED / 자동발신을 절대 거치면 안 된다 (무한루프).
 	if (payload.event === "echo") {
-		await handleEchoEvent(env, payload, backupRow.rowNumber).catch((echoErr) => {
+		await handleEchoEvent(env, payload).catch((echoErr) => {
 			console.error("[webhook] echo 처리 실패:", echoErr);
 		});
-		if (messageId) markProcessed(messageId);
+		if (dedupKey) markProcessed(dedupKey);
 		return new Response("ok", { status: 200 });
 	}
 
@@ -284,12 +272,7 @@ export async function handleWebhook(
 	// 비-send 도 무조건 200 OK — 톡톡이 재전송하지 않도록. (echo 는 위에서 별도 분기)
 	if (payload.event && payload.event !== "send") {
 		console.log(`[webhook] 비-send 이벤트 스킵 event=${payload.event}`);
-		await updateBackupStatus(env, backupRow.rowNumber, "처리완료", {
-			분류결과: `${payload.event} 이벤트 (처리 스킵)`,
-		}).catch((updateErr) => {
-			console.error("[webhook] 백업 상태 갱신 실패:", updateErr);
-		});
-		if (messageId) markProcessed(messageId);
+		if (dedupKey) markProcessed(dedupKey);
 		return new Response("ok", { status: 200 });
 	}
 
@@ -297,7 +280,7 @@ export async function handleWebhook(
 	// processMessage(Sheets 조회 → 구 분류기 → Sheets 업데이트 → Discord/push)는
 	// 신 시스템과 중복 실행되어 오탐(신규 고객 오판정) 원인이 됐으므로 제거.
 
-	if (messageId) markProcessed(messageId);
+	if (dedupKey) markProcessed(dedupKey);
 	console.log(`[webhook] 처리 완료 rowNumber=${backupRow.rowNumber}`);
 	return new Response("ok", { status: 200 });
 }
@@ -317,12 +300,11 @@ export async function handleWebhook(
 async function handleEchoEvent(
 	env: Env,
 	payload: RawWebhookPayload,
-	rowNumber: number,
 ): Promise<void> {
 	const talkId = payload.user ?? "";
 	// 일반 echo 는 디버그 로그 — 운영 중 노이즈가 되지 않도록 console.debug.
 	console.debug(
-		`[webhook] echo 이벤트 수신 (사장님 발송) talkId=${talkId || "-"} rowNumber=${rowNumber}`,
+		`[webhook] echo 이벤트 수신 (사장님 발송) talkId=${talkId || "-"}`,
 	);
 
 	// Phase 4.5 Step 2: 확정문자 echo 매칭 → bookings/customers 자동 보완.
@@ -358,8 +340,5 @@ async function handleEchoEvent(
 		}
 	}
 
-	await updateBackupStatus(env, rowNumber, "처리완료", {
-		분류결과: "echo (사장님 발송 메시지)",
-	});
 }
 

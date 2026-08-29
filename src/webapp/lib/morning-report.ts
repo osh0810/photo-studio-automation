@@ -175,6 +175,7 @@ export async function runMorningReport(env: Env, force = false): Promise<void> {
 	).all<TodayShootRow>();
 
 	// B. 원본발송대기
+	// shoot_date는 KST 저장 예외 컬럼 → datetime 비교로 촬영 시각이 지난 건만 포함
 	const originalWaitRes = await env.DB.prepare(
 		`SELECT b.booking_id, b.customer_name, b.urgent_retouch_until,
 		        CAST(julianday(date('now', '+9 hours')) - julianday(date(b.shoot_date)) AS INTEGER) AS days_since
@@ -182,39 +183,43 @@ export async function runMorningReport(env: Env, force = false): Promise<void> {
 		 WHERE b.cancelled = 0
 		   AND b.shoot_date IS NOT NULL
 		   AND b.original_sent_at IS NULL
-		   AND date(b.shoot_date) <= date('now', '+9 hours')
+		   AND b.selection_received_at IS NULL
+		   AND datetime(b.shoot_date) <= datetime('now', '+9 hours')
 		 ORDER BY (b.urgent_retouch_until IS NOT NULL) DESC, days_since DESC`,
 	).all<OriginalWaitRow>();
 
 	// C. 액자발주대기
+	// UTC 저장 milestone 컬럼은 date(컬럼, '+9 hours')로 KST 날짜 비교
 	const frameOrderWaitRes = await env.DB.prepare(
 		`SELECT b.booking_id, b.customer_name, c.frame_address, b.urgent_retouch_until,
 		        CAST(julianday(date('now', '+9 hours'))
 		          - julianday(date(
-		              COALESCE(b.revision_no_more_at, b.revision_sent_at, b.retouched_sent_at)
+		              COALESCE(b.revision_no_more_at, b.revision_sent_at, b.retouched_sent_at),
+		              '+9 hours'
 		            )) AS INTEGER) AS days_since
 		 FROM bookings b
 		 LEFT JOIN customers c ON b.talk_id = c.talk_id
 		 WHERE b.cancelled = 0
 		   AND b.frame_ordered_at IS NULL
 		   AND (b.alert_paused_until IS NULL
-		        OR date(b.alert_paused_until) < date('now', '+9 hours'))
+		        OR date(b.alert_paused_until, '+9 hours') < date('now', '+9 hours'))
 		   AND NOT (
 		     b.revision_requested_at IS NOT NULL
 		     AND (b.revision_sent_at IS NULL OR b.revision_requested_at > b.revision_sent_at)
 		   )
 		   AND (
 		     (b.retouched_sent_at IS NOT NULL
-		      AND julianday(date('now', '+9 hours')) - julianday(date(b.retouched_sent_at)) >= 1)
+		      AND julianday(date('now', '+9 hours')) - julianday(date(b.retouched_sent_at, '+9 hours')) >= 1)
 		     OR (b.revision_sent_at IS NOT NULL
-		      AND julianday(date('now', '+9 hours')) - julianday(date(b.revision_sent_at)) >= 1)
+		      AND julianday(date('now', '+9 hours')) - julianday(date(b.revision_sent_at, '+9 hours')) >= 1)
 		     OR (b.revision_no_more_at IS NOT NULL
-		      AND julianday(date('now', '+9 hours')) - julianday(date(b.revision_no_more_at)) >= 1)
+		      AND julianday(date('now', '+9 hours')) - julianday(date(b.revision_no_more_at, '+9 hours')) >= 1)
 		   )
 		 ORDER BY (b.urgent_retouch_until IS NOT NULL) DESC, days_since DESC`,
 	).all<FrameOrderWaitRow>();
 
 	// D. 보정대기
+	// UTC 저장 milestone 컬럼은 date(컬럼, '+9 hours')로 KST 날짜 비교
 	const retouchWaitRes = await env.DB.prepare(
 		`SELECT b.booking_id, b.customer_name,
 		        b.revision_requested_at, b.urgent_retouch_until,
@@ -223,33 +228,33 @@ export async function runMorningReport(env: Env, force = false): Promise<void> {
 		          WHEN b.revision_requested_at IS NOT NULL THEN
 		            CASE
 		              WHEN CAST(julianday(date('now', '+9 hours'))
-		                   - julianday(date(b.revision_requested_at)) AS INTEGER) >= 2 THEN 1
+		                   - julianday(date(b.revision_requested_at, '+9 hours')) AS INTEGER) >= 2 THEN 1
 		              WHEN CAST(julianday(date('now', '+9 hours'))
-		                   - julianday(date(b.revision_requested_at)) AS INTEGER) >= 1 THEN 2
+		                   - julianday(date(b.revision_requested_at, '+9 hours')) AS INTEGER) >= 1 THEN 2
 		              ELSE 3
 		            END
 		          ELSE
 		            CASE
 		              WHEN CAST(julianday(date('now', '+9 hours'))
-		                   - julianday(date(b.selection_received_at)) AS INTEGER) >= 7 THEN 1
+		                   - julianday(date(b.selection_received_at, '+9 hours')) AS INTEGER) >= 7 THEN 1
 		              WHEN CAST(julianday(date('now', '+9 hours'))
-		                   - julianday(date(b.selection_received_at)) AS INTEGER) >= 5 THEN 2
+		                   - julianday(date(b.selection_received_at, '+9 hours')) AS INTEGER) >= 5 THEN 2
 		              ELSE 3
 		            END
 		        END AS color_priority,
 		        CASE
 		          WHEN b.revision_requested_at IS NOT NULL THEN
 		            CAST(julianday(date('now', '+9 hours'))
-		                 - julianday(date(b.revision_requested_at)) AS INTEGER)
+		                 - julianday(date(b.revision_requested_at, '+9 hours')) AS INTEGER)
 		          ELSE
 		            CAST(julianday(date('now', '+9 hours'))
-		                 - julianday(date(b.selection_received_at)) AS INTEGER)
+		                 - julianday(date(b.selection_received_at, '+9 hours')) AS INTEGER)
 		        END AS days_since
 		 FROM bookings b
 		 WHERE b.cancelled = 0
 		   AND b.frame_ordered_at IS NULL
 		   AND (b.alert_paused_until IS NULL
-		        OR date(b.alert_paused_until) < date('now', '+9 hours'))
+		        OR date(b.alert_paused_until, '+9 hours') < date('now', '+9 hours'))
 		   AND (
 		     (b.selection_received_at IS NOT NULL AND b.retouched_sent_at IS NULL)
 		     OR
@@ -260,17 +265,18 @@ export async function runMorningReport(env: Env, force = false): Promise<void> {
 	).all<RetouchWaitRow>();
 
 	// E. 셀렉대기
+	// UTC 저장 milestone 컬럼은 date(컬럼, '+9 hours')로 KST 날짜 비교
 	const selectionWaitRes = await env.DB.prepare(
 		`SELECT b.booking_id, b.customer_name, b.urgent_retouch_until,
 		        CAST(julianday(date('now', '+9 hours'))
-		          - julianday(date(b.original_sent_at))
+		          - julianday(date(b.original_sent_at, '+9 hours'))
 		          AS INTEGER) AS days_since
 		 FROM bookings b
 		 WHERE b.cancelled = 0
 		   AND b.original_sent_at IS NOT NULL
 		   AND b.selection_received_at IS NULL
 		   AND (b.alert_paused_until IS NULL
-		        OR date(b.alert_paused_until) < date('now', '+9 hours'))
+		        OR date(b.alert_paused_until, '+9 hours') < date('now', '+9 hours'))
 		 ORDER BY (b.urgent_retouch_until IS NOT NULL) DESC, days_since DESC`,
 	).all<SelectionWaitRow>();
 
