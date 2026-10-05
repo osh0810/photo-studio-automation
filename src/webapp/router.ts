@@ -7,6 +7,7 @@ import { handleLogin, handleCallback, handleLogout, handleReauth, requireAuth } 
 import { renderLoginPage } from './ui/login';
 import { renderDashboardPage } from './ui/dashboard';
 import { renderChatPage } from './ui/chat';
+import { handleAssistantConfirmation } from './handlers/booking-confirmation-api';
 import { renderCostPage } from './ui/cost';
 import {
   handleGetBookings,
@@ -277,6 +278,9 @@ if (pathname === '/api/report' && request.method === 'GET') {
 if (pathname === '/api/bookings' && request.method === 'GET') {
     return handleGetBookings(request, env);
 }
+
+const confirmationRoute = pathname.match(/^\/api\/bookings\/(\d+)\/confirmation$/);
+if (confirmationRoute) return handleAssistantConfirmation(request, env as any, confirmationRoute[1]);
 
 if (pathname.startsWith('/api/bookings/') && request.method === 'GET') {
     const bookingId = pathname.replace('/api/bookings/', '');

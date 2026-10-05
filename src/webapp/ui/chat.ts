@@ -2573,6 +2573,9 @@ export function renderChatPage(userEmail: string): string {
 
       // 🛍️ 현장 추가 상품 카드: 카드 바깥에 [✅ 추가] [❌ 건너뛰기] 버튼
       const mtype = m.metadata && m.metadata.type;
+      if (mtype === 'confirm_message' && m.metadata.source === 'naver_email' && /^[0-9]{10}$/.test(m.metadata.booking_id || '')) {
+        attachBookingConfirmation(card, m.metadata.booking_id);
+      }
       if (mtype === 'drive_new_products_detected') {
         const row = el('div', { class: 'drive-actions' });
         const yesBtn = el('button', {
@@ -2773,6 +2776,63 @@ export function renderChatPage(userEmail: string): string {
         console.error('[chat] 복사 실패:', err);
         showToast('복사 실패');
       }
+    }
+
+    function attachBookingConfirmation(card, bookingId) {
+      const row = el('div', { class: 'confirm-buttons' });
+      const button = el('button', { type: 'button' }, '확인 후 두 메시지 발송');
+      button.disabled = true;
+      const status = el('div', { class: 'confirm-result' });
+      row.appendChild(button);
+      card.appendChild(row);
+      card.appendChild(status);
+      const path = '/api/bookings/' + encodeURIComponent(bookingId) + '/confirmation';
+      const labels = { queued: '승인 완료 · PC 실행기 연결 대기', running: '발송 처리 중 · 오래 지속되면 대화창을 확인해주세요', sending: '발송 처리 중', sent: '예약확정 안내와 추가 질문 발송 완료', already_sent: '기존 예약확정 발송 확인 · 중복 발송하지 않습니다', uncertain: '발송 결과 확인 필요 · 톡톡 대화창을 확인해주세요' };
+      let timer;
+      async function refresh() {
+        if (!card.isConnected) { clearTimeout(timer); return; }
+        try {
+          const plan = await api('GET', path);
+          button.textContent = plan.additional_message ? '확인 후 두 메시지 발송' : '확인 후 예약 안내 발송';
+          button.disabled = plan.status !== 'ready' || plan.has_unmatched_products;
+          status.textContent = plan.status === 'sent' && !plan.additional_message ? '예약확정 안내 발송 완료' : labels[plan.status] || (plan.has_unmatched_products ? '예약 상품 매칭을 먼저 완료해주세요' : '예약확정 안내와 상품별 추가 질문을 함께 보냅니다');
+          if (['queued', 'running', 'sending'].includes(plan.status)) timer = setTimeout(refresh, 15000);
+        } catch (e) { status.textContent = e.message || '상태 확인 실패'; }
+      }
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+          const plan = await api('GET', path);
+          if (plan.status !== 'ready') { await refresh(); return; }
+          const modal = el('div', { class: 'modal-overlay' });
+          const panel = el('div', { class: 'modal-panel' });
+          panel.style.cssText = 'background:var(--bg);padding:24px;border-radius:12px;max-width:640px;width:90%;max-height:85vh;overflow:auto';
+          panel.appendChild(el('h3', {}, '예약 ' + bookingId + ' 발송 확인'));
+          if (plan.needs_full_name) panel.appendChild(el('p', {}, '네이버 예약 화면에서 전체 이름을 읽어 발송합니다. PC 실행기와 네이버 로그인이 필요합니다.'));
+          const preview = el('pre', {}, plan.preview_message + (plan.additional_message ? '\\n\\n[두 번째 메시지]\\n' + plan.additional_message : '\\n\\n상품에 추가 질문이 설정되어 있지 않습니다.'));
+          preview.style.cssText = 'white-space:pre-wrap;font:inherit;line-height:1.6';
+          panel.appendChild(preview);
+          const approve = el('button', { type: 'button' }, '확인 · 발송');
+          const cancel = el('button', { type: 'button' }, '닫기');
+          const errorBox = el('p', {});
+          cancel.addEventListener('click', () => { modal.remove(); refresh(); });
+          approve.addEventListener('click', async () => {
+            approve.disabled = true;
+            try {
+              const result = await api('POST', path, {});
+              status.textContent = labels[result.status] || '승인 완료';
+              modal.remove();
+              await refresh();
+            } catch (e) { errorBox.textContent = e.message || '발송 요청 실패'; approve.disabled = false; await refresh(); }
+          });
+          const actions = el('div', { class: 'confirm-buttons' });
+          actions.appendChild(approve); actions.appendChild(cancel);
+          panel.appendChild(actions); panel.appendChild(errorBox);
+          modal.appendChild(panel); document.body.appendChild(modal);
+        } catch (e) { status.textContent = e.message || '확인 실패'; button.disabled = false; }
+      });
+      // Defer until the card has been inserted into the document.
+      setTimeout(refresh, 0);
     }
 
     async function handleConfirm(messageId, actionId, value, detailsEl) {

@@ -1,0 +1,14 @@
+{
+  "bizId": "745146",
+  "profileDir": "scripts/output/naver-profile",
+  "channel": "msedge",
+  "conversationMode": "popup",
+  "bookingIdSelector": "[class*=\"SideFrame__root__\"] [class*=\"Summary__item__\"]:has(> :text-is(\"예약번호\")) > [class*=\"Summary__item-dsc__\"]",
+  "fullNameSelector": "[class*=\"SideFrame__root__\"] [class*=\"Summary__name__\"]",
+  "talkButtonSelector": "[class*=\"SideFrame__root__\"] button:has-text(\"톡톡 대화하기\")",
+  "messageInputSelector": "#partner_chat_write",
+  "sendButtonSelector": "button.chat_write_btn",
+  "sentMessageSelector": "li[data-sender=\"partner\"] p.title_content",
+  "bookingLinkSelector": "a[href*=\"/booking-list-view/bookings/\"]",
+  "dismissDialogSelector": "button:has-text(\"닫기\")"
+}

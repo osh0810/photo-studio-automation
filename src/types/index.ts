@@ -22,13 +22,10 @@ declare global {
 			AI_CONTEXT_MAX_MESSAGES?: string;
 			AI_DAILY_LIMIT?: string;
 			CRON_BATCH_LIMIT?: string;
-			ALLOWED_EMAIL?: string;
+			ALLOWED_EMAIL: string;
 			VAPID_PUBLIC_KEY?: string;
 			VAPID_PRIVATE_KEY?: string;
 			VAPID_SUBJECT?: string;
-			NAVER_BIZ_ID: string;
-			CALENDAR_ID: string;
-			TIMEZONE: string;
 			BASE_URL: string;
 		}
 	}

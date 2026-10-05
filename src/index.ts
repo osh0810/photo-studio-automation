@@ -1,4 +1,5 @@
 import { handleAdminSendTalk } from "./handlers/admin-send-talk";
+import { handleBookingConfirmation } from './handlers/booking-confirmation';
 import { handleScheduledAlert, runDailyAlert } from "./handlers/cron";
 import { handleWebhook } from "./handlers/webhook";
 import type { RawWebhookPayload } from "./services/backup";
@@ -61,6 +62,7 @@ import {
 export default {
 	async fetch(request, env): Promise<Response> {
 		const url = new URL(request.url);
+		if (url.pathname === '/admin/booking-confirmation') return handleBookingConfirmation(request, env);
 		
 		// 새 웹앱 라우터 먼저 시도
 		const webappResponse = await handleWebappRequest(request, env as any);
