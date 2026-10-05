@@ -1,5 +1,6 @@
 import type { Env } from '../types';
-import { claimConfirmationJob, completeConfirmationJob } from '../webapp/lib/booking-confirmation-jobs';
+import { claimConfirmationJob, completeConfirmationJob, deferConfirmationForLogin } from '../webapp/lib/booking-confirmation-jobs';
+import { reportRunnerStatus } from '../webapp/lib/booking-runner-status';
 import { ConfirmationError, validateBookingId, prepareConfirmation, startConfirmation, finishConfirmation } from '../webapp/lib/booking-confirmation';
 
 export async function handleBookingConfirmation(request: Request, env: Env): Promise<Response> {
@@ -16,8 +17,14 @@ export async function handleBookingConfirmation(request: Request, env: Env): Pro
     try { body = await request.json() as Record<string, unknown>; }
     catch { throw new ConfirmationError('올바른 JSON이 필요합니다.'); }
     if (!body || typeof body !== 'object') throw new ConfirmationError('JSON 객체가 필요합니다.');
+    if (body.action === 'runner_status') return json(await reportRunnerStatus(env, body.status));
     if (body.action === 'claim_job') return json({ job: await claimConfirmationJob(env) });
     const bookingId = validateBookingId(body.booking_id);
+    if (body.action === 'defer_login') {
+      if (typeof body.claim_id !== 'string') throw new ConfirmationError('claim_id가 필요합니다.');
+      await deferConfirmationForLogin(env, bookingId, body.claim_id);
+      return json({ success: true, status: 'queued' });
+    }
     if (body.action === 'complete_job') {
       if (typeof body.claim_id !== 'string') throw new ConfirmationError('claim_id가 필요합니다.');
       await completeConfirmationJob(env, bookingId, body.claim_id, String(body.status), typeof body.error === 'string' ? body.error : undefined);

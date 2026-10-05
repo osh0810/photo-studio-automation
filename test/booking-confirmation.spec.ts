@@ -4,7 +4,8 @@ import { handleBookingConfirmation } from '../src/handlers/booking-confirmation'
 import { prepareConfirmation, startConfirmation } from '../src/webapp/lib/booking-confirmation';
 import { matchEchoToBooking } from '../src/webapp/lib/echo-matcher';
 import { sendNaverTalkMessage } from '../src/services/talk';
-import { approveConfirmation, claimConfirmationJob, completeConfirmationJob, confirmationState } from '../src/webapp/lib/booking-confirmation-jobs';
+import { approveConfirmation, claimConfirmationJob, completeConfirmationJob, confirmationState, deferConfirmationForLogin } from '../src/webapp/lib/booking-confirmation-jobs';
+import { reportRunnerStatus } from '../src/webapp/lib/booking-runner-status';
 import { handleAssistantConfirmation } from '../src/webapp/handlers/booking-confirmation-api';
 import { createSession } from '../src/webapp/lib/session';
 
@@ -13,6 +14,7 @@ vi.mock('../src/webapp/lib/calendar-event-builder', () => ({ renameCustomerInCal
 beforeAll(async () => { await applyD1Migrations(env.DB, env.TEST_MIGRATIONS); });
 beforeEach(async () => {
   vi.mocked(sendNaverTalkMessage).mockReset();
+  await env.DB.prepare("UPDATE booking_runner_status SET status = 'unknown' WHERE id = 1").run();
   await env.DB.prepare('DELETE FROM booking_confirmation_jobs').run();
   await env.DB.prepare('DELETE FROM talk_messages').run();
   await env.DB.prepare('DELETE FROM booking_details').run();
@@ -155,5 +157,29 @@ describe('Reservation confirmation', () => {
     const response = await handleAssistantConfirmation(new Request(url, { method: 'POST', headers: { ...headers, origin: 'https://studio.test' } }), runtime(), '1234567890');
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ status: 'queued' });
+  });
+  it('notifies login expiration once and emits a recovery notice after login', async () => {
+    const first = await reportRunnerStatus(runtime(), 'login_required');
+    expect(first.notified).toBe(true);
+    expect(first.login_url).toBe('http://127.0.0.1:18766/');
+    expect((await reportRunnerStatus(runtime(), 'login_required')).notified).toBe(false);
+    const notice = await env.DB.prepare("SELECT message, metadata FROM ai_chat_messages WHERE json_extract(metadata, '$.type') = 'runner_login_required' ORDER BY id DESC LIMIT 1")
+      .first<{ message: string; metadata: string }>();
+    expect(notice?.message).toContain('전용 Edge');
+    expect(JSON.parse(notice!.metadata).login_url).toBe(first.login_url);
+    expect((await reportRunnerStatus(runtime(), 'ready')).notified).toBe(true);
+    expect((await reportRunnerStatus(runtime(), 'ready')).notified).toBe(false);
+    await expect(reportRunnerStatus(runtime(), 'invalid')).rejects.toThrow('상태');
+  });
+  it('requeues a proven login failure before any send but never requeues a claimed send', async () => {
+    await booking();
+    await approveConfirmation(runtime(), '1234567890', 'owner@test');
+    const first = (await claimConfirmationJob(runtime()))!;
+    await deferConfirmationForLogin(runtime(), first.booking_id, first.claim_id);
+    expect((await confirmationState(runtime(), first.booking_id)).status).toBe('queued');
+    const second = (await claimConfirmationJob(runtime()))!;
+    await startConfirmation(runtime(), second.booking_id, '홍길동');
+    await expect(deferConfirmationForLogin(runtime(), second.booking_id, second.claim_id)).rejects.toThrow('재발송');
+    expect((await confirmationState(runtime(), second.booking_id)).status).toBe('sending');
   });
 });

@@ -2573,6 +2573,12 @@ export function renderChatPage(userEmail: string): string {
 
       // 🛍️ 현장 추가 상품 카드: 카드 바깥에 [✅ 추가] [❌ 건너뛰기] 버튼
       const mtype = m.metadata && m.metadata.type;
+      if (mtype === 'runner_login_required' && m.metadata.source === 'booking_runner') {
+        const row = el('div', { class: 'confirm-buttons' });
+        const link = el('a', { href: 'http://127.0.0.1:18766/', target: '_blank', rel: 'noopener noreferrer' }, '전용 브라우저 네이버 로그인');
+        link.style.cssText = 'display:inline-block;padding:10px 14px;border-radius:8px;background:var(--accent);color:white;text-decoration:none';
+        row.appendChild(link); card.appendChild(row);
+      }
       if (mtype === 'confirm_message' && m.metadata.source === 'naver_email' && /^[0-9]{10}$/.test(m.metadata.booking_id || '')) {
         attachBookingConfirmation(card, m.metadata.booking_id);
       }
@@ -2795,7 +2801,7 @@ export function renderChatPage(userEmail: string): string {
           const plan = await api('GET', path);
           button.textContent = plan.additional_message ? '확인 후 두 메시지 발송' : '확인 후 예약 안내 발송';
           button.disabled = plan.status !== 'ready' || plan.has_unmatched_products;
-          status.textContent = plan.status === 'sent' && !plan.additional_message ? '예약확정 안내 발송 완료' : labels[plan.status] || (plan.has_unmatched_products ? '예약 상품 매칭을 먼저 완료해주세요' : '예약확정 안내와 상품별 추가 질문을 함께 보냅니다');
+          status.textContent = plan.status === 'queued' && plan.runner_login_required ? '승인 완료 · 네이버 재로그인 대기' : plan.status === 'sent' && !plan.additional_message ? '예약확정 안내 발송 완료' : labels[plan.status] || (plan.has_unmatched_products ? '예약 상품 매칭을 먼저 완료해주세요' : '예약확정 안내와 상품별 추가 질문을 함께 보냅니다');
           if (['queued', 'running', 'sending'].includes(plan.status)) timer = setTimeout(refresh, 15000);
         } catch (e) { status.textContent = e.message || '상태 확인 실패'; }
       }

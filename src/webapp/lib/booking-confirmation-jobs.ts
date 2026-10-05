@@ -5,7 +5,8 @@ export async function confirmationState(env: Env, bookingId: string) {
   const plan = await prepareConfirmation(env, bookingId);
   const job = await env.DB.prepare('SELECT status, error, updated_at FROM booking_confirmation_jobs WHERE booking_id = ?1')
     .bind(bookingId).first<{ status: string; error: string | null; updated_at: string }>();
-  return { ...plan, job, status: plan.status !== 'ready' ? plan.status : job?.status ?? 'ready' };
+  const runner = await env.DB.prepare('SELECT status FROM booking_runner_status WHERE id = 1').first<{ status: string }>();
+  return { ...plan, job, runner_login_required: runner?.status === 'login_required', status: plan.status !== 'ready' ? plan.status : job?.status ?? 'ready' };
 }
 
 export async function approveConfirmation(env: Env, bookingId: string, userEmail: string) {
@@ -44,4 +45,13 @@ export async function completeConfirmationJob(env: Env, bookingId: string, claim
     error = ?4, updated_at = datetime('now') WHERE booking_id = ?1 AND claim_id = ?2 AND status = 'running'`)
     .bind(bookingId, claimId, status, error?.slice(0, 300) ?? null).run();
   if (!result.meta.changes) throw new ConfirmationError('유효한 실행 중 예약이 없습니다.', 409);
+}
+
+/** Only a proven login failure BEFORE a send claim may return to the approval queue. */
+export async function deferConfirmationForLogin(env: Env, bookingId: string, claimId: string) {
+  const result = await env.DB.prepare(`UPDATE booking_confirmation_jobs SET status = 'queued', claim_id = NULL,
+    error = '네이버 재로그인 대기', updated_at = datetime('now') WHERE booking_id = ?1 AND claim_id = ?2
+    AND status = 'running' AND NOT EXISTS (SELECT 1 FROM booking_confirmation_sends WHERE booking_id = ?1)`)
+    .bind(bookingId, claimId).run();
+  if (!result.meta.changes) throw new ConfirmationError('발송 시도가 있거나 유효한 로그인 대기 건이 아닙니다. 재발송하지 않습니다.', 409);
 }
