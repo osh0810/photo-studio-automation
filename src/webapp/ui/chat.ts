@@ -2575,7 +2575,7 @@ export function renderChatPage(userEmail: string): string {
       const mtype = m.metadata && m.metadata.type;
       if (mtype === 'runner_login_required' && m.metadata.source === 'booking_runner') {
         const row = el('div', { class: 'confirm-buttons' });
-        const link = el('a', { href: 'http://127.0.0.1:18766/', target: '_blank', rel: 'noopener noreferrer' }, '전용 브라우저 네이버 로그인');
+        const link = el('a', { href: 'http://127.0.0.1:18766/', target: '_blank', rel: 'noopener noreferrer' }, '예약 실행기 연결 · 네이버 로그인 안내');
         link.style.cssText = 'display:inline-block;padding:10px 14px;border-radius:8px;background:var(--accent);color:white;text-decoration:none';
         row.appendChild(link); card.appendChild(row);
       }

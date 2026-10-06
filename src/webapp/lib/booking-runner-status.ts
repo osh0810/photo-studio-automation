@@ -7,7 +7,7 @@ export async function reportRunnerStatus(env: Env, status: unknown) {
   const required = status === 'login_required';
   const metadata = JSON.stringify({ type: required ? 'runner_login_required' : 'runner_login_restored', source: 'booking_runner', login_url: RUNNER_LOGIN_URL });
   const message = required
-    ? '🔑 예약 실행기의 네이버 로그인이 만료되었습니다. 최초 고객의 발송은 대기 중입니다.\n예약 실행기가 설치된 PC에서 아래 로그인 버튼을 눌러 전용 Edge에 다시 로그인해주세요. 휴대폰이나 다른 PC에서는 연결할 수 없습니다.'
+    ? '🔑 네이버 로그인 또는 보안 확인이 필요합니다. 최초 고객의 발송은 대기 중입니다.\n예약 실행기가 설치된 PC에서 아래 실행기 연결 버튼을 눌러 안내를 확인해주세요. 일반 Edge 확장을 사용 중이면 평소 사용하는 Edge에서 로그인 후 확장의 자동 처리를 다시 켜주세요. 휴대폰이나 다른 PC에서는 실행기를 연결할 수 없습니다.'
     : '✅ 예약 실행기의 네이버 로그인 연결이 복구되었습니다. 승인된 대기 예약을 이어서 처리합니다.';
   // One atomic transaction: repeated reports cannot generate repeated alerts.
   const results = await env.DB.batch([

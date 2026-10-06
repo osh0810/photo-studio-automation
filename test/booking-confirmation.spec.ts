@@ -222,7 +222,7 @@ describe('Reservation confirmation', () => {
     expect((await reportRunnerStatus(runtime(), 'login_required')).notified).toBe(false);
     const notice = await env.DB.prepare("SELECT message, metadata FROM ai_chat_messages WHERE json_extract(metadata, '$.type') = 'runner_login_required' ORDER BY id DESC LIMIT 1")
       .first<{ message: string; metadata: string }>();
-    expect(notice?.message).toContain('전용 Edge');
+    expect(notice?.message).toContain('일반 Edge 확장');
     expect(JSON.parse(notice!.metadata).login_url).toBe(first.login_url);
     expect((await reportRunnerStatus(runtime(), 'ready')).notified).toBe(true);
     expect((await reportRunnerStatus(runtime(), 'ready')).notified).toBe(false);

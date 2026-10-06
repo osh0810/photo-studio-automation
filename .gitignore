@@ -181,3 +181,11 @@ __pycache__/
 
 # 스크립트 출력물
 scripts/output/
+
+# PC runner pairing tokens and local customer diagnostics
+edge-pairing.json
+edge-diagnostic.json
+runner-state.json
+runner.pid
+keep-awake-state.json
+edge-transport-state.json
