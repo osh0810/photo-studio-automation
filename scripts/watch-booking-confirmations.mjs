@@ -58,10 +58,10 @@ while (!stopping) {
       if (!stopping) await new Promise(resolve => setTimeout(resolve, 15000));
       continue; // Keep approvals queued until this dedicated profile is authenticated.
     }
-    const processed = await processApprovedJob({ api, run: async bookingId => {
+    const processed = await processApprovedJob({ api, run: async (bookingId, messageKind) => {
       try {
         const { stdout } = await execute(process.execPath,
-          [fileURLToPath(new URL('./confirm-booking.mjs', import.meta.url)), bookingId, '--send', config],
+          [fileURLToPath(new URL('./confirm-booking.mjs', import.meta.url)), bookingId, '--send', '--message-kind=' + messageKind, config],
           { windowsHide: true, maxBuffer: 1024 * 1024 });
         return JSON.parse(stdout);
       } catch (error) {

@@ -2580,7 +2580,10 @@ export function renderChatPage(userEmail: string): string {
         row.appendChild(link); card.appendChild(row);
       }
       if (mtype === 'confirm_message' && m.metadata.source === 'naver_email' && /^[0-9]{10}$/.test(m.metadata.booking_id || '')) {
-        attachBookingConfirmation(card, m.metadata.booking_id);
+        attachBookingConfirmation(card, m.metadata.booking_id, 'confirmation');
+      }
+      if (mtype === 'additional_questions' && m.metadata.source === 'naver_email' && /^[0-9]{10}$/.test(m.metadata.booking_id || '')) {
+        attachBookingConfirmation(card, m.metadata.booking_id, 'additional');
       }
       if (mtype === 'drive_new_products_detected') {
         const row = el('div', { class: 'drive-actions' });
@@ -2784,24 +2787,26 @@ export function renderChatPage(userEmail: string): string {
       }
     }
 
-    function attachBookingConfirmation(card, bookingId) {
+    function attachBookingConfirmation(card, bookingId, messageKind) {
       const row = el('div', { class: 'confirm-buttons' });
-      const button = el('button', { type: 'button' }, '확인 후 두 메시지 발송');
+      const title = messageKind === 'additional' ? '추가 질문' : '예약확정 안내';
+      const button = el('button', { type: 'button' }, title + ' 발송');
+      button.style.cssText = 'padding:10px 14px;border:0;border-radius:8px;background:var(--accent);color:white;cursor:pointer';
       button.disabled = true;
       const status = el('div', { class: 'confirm-result' });
       row.appendChild(button);
       card.appendChild(row);
       card.appendChild(status);
-      const path = '/api/bookings/' + encodeURIComponent(bookingId) + '/confirmation';
-      const labels = { queued: '승인 완료 · PC 실행기 연결 대기', running: '발송 처리 중 · 오래 지속되면 대화창을 확인해주세요', sending: '발송 처리 중', sent: '예약확정 안내와 추가 질문 발송 완료', already_sent: '기존 예약확정 발송 확인 · 중복 발송하지 않습니다', uncertain: '발송 결과 확인 필요 · 톡톡 대화창을 확인해주세요' };
+      const path = '/api/bookings/' + encodeURIComponent(bookingId) + '/confirmation?message_kind=' + messageKind;
+      const labels = { queued: '승인 완료 · PC 실행기 연결 대기', running: '발송 처리 중 · 오래 지속되면 대화창을 확인해주세요', sending: '발송 처리 중', sent: title + ' 발송 완료', already_sent: title + ' 기존 발송 확인 · 중복 발송하지 않습니다', unavailable: '추가 질문이 설정되어 있지 않습니다', uncertain: '발송 결과 확인 필요 · 톡톡 대화창을 확인해주세요' };
       let timer;
       async function refresh() {
         if (!card.isConnected) { clearTimeout(timer); return; }
         try {
           const plan = await api('GET', path);
-          button.textContent = plan.additional_message ? '확인 후 두 메시지 발송' : '확인 후 예약 안내 발송';
+          button.textContent = title + ' 발송';
           button.disabled = plan.status !== 'ready' || plan.has_unmatched_products;
-          status.textContent = plan.status === 'queued' && plan.runner_login_required ? '승인 완료 · 네이버 재로그인 대기' : plan.status === 'sent' && !plan.additional_message ? '예약확정 안내 발송 완료' : labels[plan.status] || (plan.has_unmatched_products ? '예약 상품 매칭을 먼저 완료해주세요' : '예약확정 안내와 상품별 추가 질문을 함께 보냅니다');
+          status.textContent = plan.status === 'queued' && plan.runner_login_required ? '승인 완료 · 네이버 재로그인 대기' : labels[plan.status] || (plan.has_unmatched_products ? '예약 상품 매칭을 먼저 완료해주세요' : title + '만 발송합니다');
           if (['queued', 'running', 'sending'].includes(plan.status)) timer = setTimeout(refresh, 15000);
         } catch (e) { status.textContent = e.message || '상태 확인 실패'; }
       }
@@ -2815,7 +2820,7 @@ export function renderChatPage(userEmail: string): string {
           panel.style.cssText = 'background:var(--bg);padding:24px;border-radius:12px;max-width:640px;width:90%;max-height:85vh;overflow:auto';
           panel.appendChild(el('h3', {}, '예약 ' + bookingId + ' 발송 확인'));
           if (plan.needs_full_name) panel.appendChild(el('p', {}, '네이버 예약 화면에서 전체 이름을 읽어 발송합니다. PC 실행기와 네이버 로그인이 필요합니다.'));
-          const preview = el('pre', {}, plan.preview_message + (plan.additional_message ? '\\n\\n[두 번째 메시지]\\n' + plan.additional_message : '\\n\\n상품에 추가 질문이 설정되어 있지 않습니다.'));
+          const preview = el('pre', {}, plan.preview_message);
           preview.style.cssText = 'white-space:pre-wrap;font:inherit;line-height:1.6';
           panel.appendChild(preview);
           const approve = el('button', { type: 'button' }, '확인 · 발송');
@@ -2825,7 +2830,7 @@ export function renderChatPage(userEmail: string): string {
           approve.addEventListener('click', async () => {
             approve.disabled = true;
             try {
-              const result = await api('POST', path, {});
+              const result = await api('POST', path, { message_kind: messageKind });
               status.textContent = labels[result.status] || '승인 완료';
               modal.remove();
               await refresh();

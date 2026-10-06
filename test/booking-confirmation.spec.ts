@@ -35,6 +35,62 @@ async function booking(id = '1234567890', talkId: string | null = null, cancelle
     SELECT ?1, product_id, 1, 'matched', '클래식아기사진' FROM products WHERE product_code = 'BABY_TEST'`).bind(id).run();
 }
 const runtime = () => ({ ...env, ADMIN_TOKEN: 'test-admin', NAVER_TALK_TOKEN: 'test-talk' });
+describe('Independent message delivery', () => {
+  it('approves and sends exactly one message; the other remains available', async () => {
+    await booking('1234567891', 'saved-id');
+    vi.mocked(sendNaverTalkMessage).mockResolvedValue({ success: true, raw: {}, durationMs: 1 });
+    await approveConfirmation(runtime(), '1234567891', 'owner@test', 'confirmation');
+    expect(sendNaverTalkMessage).toHaveBeenCalledTimes(1);
+    expect((await confirmationState(runtime(), '1234567891', 'additional')).status).toBe('ready');
+    await approveConfirmation(runtime(), '1234567891', 'owner@test', 'additional');
+    expect(vi.mocked(sendNaverTalkMessage).mock.calls[1][2]).toBe('아이 이름/성별/촬영일 기준 개월수를 알려주세요.');
+    expect(sendNaverTalkMessage).toHaveBeenCalledTimes(2);
+    await expect(approveConfirmation(runtime(), '1234567891', 'owner@test', 'confirmation')).rejects.toThrow('이미');
+    await expect(approveConfirmation(runtime(), '1234567891', 'owner@test', 'additional')).rejects.toThrow('이미');
+    await expect(approveConfirmation(runtime(), '1234567891', 'owner@test')).rejects.toThrow('이미');
+  });
+  it('allows questions first and keeps confirmation ready', async () => {
+    await booking('1234567891', 'saved-id');
+    vi.mocked(sendNaverTalkMessage).mockResolvedValue({ success: true, raw: {}, durationMs: 1 });
+    await approveConfirmation(runtime(), '1234567891', 'owner@test', 'additional');
+    expect(sendNaverTalkMessage).toHaveBeenCalledTimes(1);
+    expect((await confirmationState(runtime(), '1234567891', 'confirmation')).status).toBe('ready');
+  });
+  it('keeps an uncertain question locked without changing the confirmation result', async () => {
+    await booking('1234567891', 'saved-id');
+    vi.mocked(sendNaverTalkMessage).mockResolvedValueOnce({ success: true, raw: {}, durationMs: 1 }).mockRejectedValueOnce(new Error('timeout'));
+    await approveConfirmation(runtime(), '1234567891', 'owner@test', 'confirmation');
+    await expect(approveConfirmation(runtime(), '1234567891', 'owner@test', 'additional')).rejects.toThrow('확인');
+    expect((await confirmationState(runtime(), '1234567891', 'confirmation')).status).toBe('sent');
+    expect((await confirmationState(runtime(), '1234567891', 'additional')).status).toBe('uncertain');
+  });
+  it('claims separate browser approvals and defers only the question after a confirmation send', async () => {
+    await booking();
+    await approveConfirmation(runtime(), '1234567890', 'owner@test', 'confirmation');
+    const first = (await claimConfirmationJob(runtime()))!;
+    expect(first.message_kind).toBe('confirmation');
+    const send = await startConfirmation(runtime(), first.booking_id, '홍길동', 'confirmation');
+    expect(send.additional_message).toBe('');
+    await handleBookingConfirmation(new Request('https://studio.test/admin/booking-confirmation', { method:'POST',headers:{authorization:'test-admin'},body:JSON.stringify({action:'complete',booking_id:first.booking_id,attempt_id:send.attempt_id,status:'sent'}) }),runtime());
+    await completeConfirmationJob(runtime(),first.booking_id,first.claim_id,'sent');
+    await approveConfirmation(runtime(),first.booking_id,'owner@test','additional');
+    const second = (await claimConfirmationJob(runtime()))!;
+    expect(second.message_kind).toBe('additional');
+    await deferConfirmationForLogin(runtime(),second.booking_id,second.claim_id);
+    expect((await confirmationState(runtime(),second.booking_id,'additional')).status).toBe('queued');
+  });
+  it('preserves legacy bundled locks and blocks an empty additional message', async () => {
+    await booking('1234567891', 'saved-id');
+    vi.mocked(sendNaverTalkMessage).mockResolvedValue({ success:true,raw:{},durationMs:1 });
+    await approveConfirmation(runtime(),'1234567891','owner@test');
+    expect((await confirmationState(runtime(),'1234567891','confirmation')).status).toBe('sent');
+    expect((await confirmationState(runtime(),'1234567891','additional')).status).toBe('sent');
+    await env.DB.prepare("UPDATE products SET additional_question_text = NULL").run();
+    await booking('1234567892');
+    expect((await confirmationState(runtime(),'1234567892','additional')).status).toBe('unavailable');
+    await expect(approveConfirmation(runtime(),'1234567892','owner@test','additional')).rejects.toThrow('이미');
+  });
+});
 describe('Reservation confirmation', () => {
   it('uses reservation number and requires a browser full name for first contact', async () => {
     await booking();
@@ -154,7 +210,8 @@ describe('Reservation confirmation', () => {
     const session = await createSession(env.DB, 'owner@test');
     const headers = { cookie: `session_id=${session.sessionId}` };
     expect((await handleAssistantConfirmation(new Request(url, { method: 'POST', headers }), runtime(), '1234567890')).status).toBe(403);
-    const response = await handleAssistantConfirmation(new Request(url, { method: 'POST', headers: { ...headers, origin: 'https://studio.test' } }), runtime(), '1234567890');
+    expect((await handleAssistantConfirmation(new Request(url, { method: 'POST', headers: { ...headers, origin: 'https://studio.test' } }), runtime(), '1234567890')).status).toBe(400);
+    const response = await handleAssistantConfirmation(new Request(url, { method: 'POST', headers: { ...headers, origin: 'https://studio.test' }, body: JSON.stringify({ message_kind: 'confirmation' }) }), runtime(), '1234567890');
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ status: 'queued' });
   });

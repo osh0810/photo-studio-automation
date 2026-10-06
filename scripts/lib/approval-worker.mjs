@@ -5,7 +5,7 @@ export async function processApprovedJob({ api, run }) {
   let status = 'uncertain';
   let error;
   try {
-    const result = await run(job.booking_id);
+    const result = await run(job.booking_id, job.message_kind || 'both');
     if (!['sent', 'already_sent'].includes(result.status)) throw new Error('발송 완료를 확인하지 못했습니다.');
     status = result.status;
   } catch (failure) {

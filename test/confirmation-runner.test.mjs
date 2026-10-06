@@ -20,6 +20,15 @@ function fixture(route = 'browser') {
   };
   return { bookingId: '1234567890', api, browser, calls, dryRun: false };
 }
+
+test('question-only browser delivery does not skip because the confirmation is already present', async () => {
+  const f = fixture(); f.messageKind = 'additional';
+  f.browser.hasConfirmation = async () => { throw new Error('confirmation check must not block questions'); };
+  await runConfirmation(f);
+  assert.equal(f.calls[0].body.message_kind, 'additional');
+  assert.equal(f.calls.find(c => c.body?.action === 'start').body.message_kind, 'additional');
+  assert.equal(f.calls.filter(c => typeof c === 'string' && c !== 'open-talk').length, 1);
+});
 test('first contact opens reservation conversation and records browser send', async () => {
   const f = fixture(); const result = await runConfirmation(f);
   assert.equal(result.talk_id_pending_echo, true);

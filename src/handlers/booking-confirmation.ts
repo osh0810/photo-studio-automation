@@ -1,7 +1,7 @@
 import type { Env } from '../types';
 import { claimConfirmationJob, completeConfirmationJob, deferConfirmationForLogin } from '../webapp/lib/booking-confirmation-jobs';
 import { reportRunnerStatus } from '../webapp/lib/booking-runner-status';
-import { ConfirmationError, validateBookingId, prepareConfirmation, startConfirmation, finishConfirmation } from '../webapp/lib/booking-confirmation';
+import { ConfirmationError, validateBookingId, validateMessageKind, prepareConfirmation, startConfirmation, finishConfirmation } from '../webapp/lib/booking-confirmation';
 
 export async function handleBookingConfirmation(request: Request, env: Env): Promise<Response> {
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -10,7 +10,7 @@ export async function handleBookingConfirmation(request: Request, env: Env): Pro
   if (!env.ADMIN_TOKEN || request.headers.get('authorization') !== env.ADMIN_TOKEN) return json({ error: '인증 실패' }, 401);
   try {
     if (request.method === 'GET') {
-      return json(await prepareConfirmation(env, validateBookingId(new URL(request.url).searchParams.get('booking_id'))));
+      return json(await prepareConfirmation(env, validateBookingId(new URL(request.url).searchParams.get('booking_id')), undefined, validateMessageKind(new URL(request.url).searchParams.get('message_kind'))));
     }
     if (request.method !== 'POST') return json({ error: 'GET 또는 POST만 허용됩니다.' }, 405);
     let body: Record<string, unknown>;
@@ -38,7 +38,7 @@ export async function handleBookingConfirmation(request: Request, env: Env): Pro
       return json({ success: true, status: body.status });
     }
     if (body.action !== 'start') throw new ConfirmationError('action은 start 또는 complete여야 합니다.');
-    return json(await startConfirmation(env, bookingId, body.full_name));
+    return json(await startConfirmation(env, bookingId, body.full_name, validateMessageKind(body.message_kind)));
   } catch (error) {
     if (error instanceof ConfirmationError) return json({ error: error.message }, error.status);
     console.error('[booking-confirmation]', error);

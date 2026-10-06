@@ -10,6 +10,12 @@ export class ConfirmationError extends Error {
   constructor(message: string, public status = 400) { super(message); }
 }
 
+export type MessageKind = 'both' | 'confirmation' | 'additional';
+export function validateMessageKind(value: unknown): MessageKind {
+  if (value === undefined || value === null) return 'both'; // old runners remain compatible
+  if (!['both', 'confirmation', 'additional'].includes(String(value))) throw new ConfirmationError('메시지 종류가 올바르지 않습니다.');
+  return value as MessageKind;
+}
 export function validateBookingId(value: unknown): string {
   if (typeof value !== 'string' || !/^\d{10}$/.test(value)) {
     throw new ConfirmationError('네이버 예약번호 10자리가 필요합니다.');
@@ -25,7 +31,7 @@ export function validateFullName(value: unknown): string {
   return name;
 }
 
-export async function prepareConfirmation(env: Env, bookingId: string, fullName?: unknown) {
+export async function prepareConfirmation(env: Env, bookingId: string, fullName?: unknown, messageKind: MessageKind = 'both') {
   validateBookingId(bookingId);
   const booking = await env.DB.prepare(
     'SELECT booking_id, customer_name, talk_id, shoot_date, current_stage, cancelled FROM bookings WHERE booking_id = ?1',
@@ -50,24 +56,32 @@ export async function prepareConfirmation(env: Env, bookingId: string, fullName?
     p.frame_count, p.frame_size, p.extra_note, p.additional_question_text FROM booking_details bd
     LEFT JOIN products p ON bd.product_id = p.product_id WHERE bd.booking_id = ?1 ORDER BY bd.id`)
     .bind(bookingId).all<BookingDetailWithProduct>();
-  const attempt = await env.DB.prepare('SELECT status FROM booking_confirmation_sends WHERE booking_id = ?1')
-    .bind(bookingId).first<{ status: string }>();
-  const echoes = await env.DB.prepare(`SELECT message_content FROM talk_messages
+  const attempt = await env.DB.prepare("SELECT status FROM booking_confirmation_sends WHERE booking_id = ?1 AND (message_kind = ?2 OR message_kind = 'both' OR ?2 = 'both') ORDER BY CASE WHEN status = 'uncertain' THEN 0 ELSE 1 END LIMIT 1")
+    .bind(bookingId, messageKind).first<{ status: string }>();
+  const echoes = await env.DB.prepare(`SELECT message_content, talk_id, message_at FROM talk_messages
     WHERE event_type = 'echo' AND sender_type = 'studio' AND message_content LIKE ?1`)
-    .bind(`%${bookingId}%`).all<{ message_content: string }>();
-  const alreadySent = echoes.results.some(row => /님\s+아래\s+내용으로\s+예약\s+완료되셨습니다/.test(row.message_content)
+    .bind(`%${bookingId}%`).all<{ message_content: string; talk_id: string; message_at: string }>();
+  const confirmationEcho = echoes.results.find(row => /님\s+아래\s+내용으로\s+예약\s+완료되셨습니다/.test(row.message_content)
     && new RegExp(`예약번호\\s*[:：]\\s*${bookingId}(?!\\d)`).test(row.message_content));
-  return { booking_id: bookingId, customer_name: name, route, talk_id: talkId,
-    needs_full_name: needsFullName, status: attempt?.status ?? (alreadySent ? 'already_sent' : 'ready'),
+  const additional = buildAdditionalQuestionMessageFromProducts(details.results);
+  let alreadySent = !!confirmationEcho;
+  if (messageKind === 'additional') {
+    const matching = confirmationEcho && additional ? await env.DB.prepare(
+      "SELECT 1 FROM talk_messages WHERE event_type = 'echo' AND sender_type = 'studio' AND talk_id = ?1 AND message_content = ?2 AND julianday(message_at) >= julianday(?3) LIMIT 1"
+    ).bind(confirmationEcho.talk_id, additional, confirmationEcho.message_at).first() : null;
+    alreadySent = !!matching;
+  }
+  return { message_kind: messageKind, booking_id: bookingId, customer_name: name, route, talk_id: talkId,
+    needs_full_name: needsFullName, status: attempt?.status ?? (messageKind === 'additional' && !additional ? 'unavailable' : alreadySent ? 'already_sent' : 'ready'),
     has_unmatched_products: details.results.some(d => d.match_status === 'unmatched' || !d.product_id || !d.product_name) || details.results.length === 0,
-    preview_message: buildConfirmMessage(name, bookingId, booking.shoot_date, details.results),
-    additional_message: buildAdditionalQuestionMessageFromProducts(details.results),
-    message: needsFullName ? null : buildConfirmMessage(validateFullName(name), bookingId, booking.shoot_date, details.results) };
+    preview_message: messageKind === 'additional' ? additional : buildConfirmMessage(name, bookingId, booking.shoot_date, details.results),
+    additional_message: messageKind === 'both' ? additional : '',
+    message: needsFullName ? null : messageKind === 'additional' ? additional : buildConfirmMessage(validateFullName(name), bookingId, booking.shoot_date, details.results) };
 }
 
 /** Claim before any external send. No automatic retries after an ambiguous result. */
-export async function startConfirmation(env: Env, bookingId: string, fullName?: unknown) {
-  const plan = await prepareConfirmation(env, bookingId, fullName);
+export async function startConfirmation(env: Env, bookingId: string, fullName?: unknown, messageKind: MessageKind = 'both') {
+  const plan = await prepareConfirmation(env, bookingId, fullName, messageKind);
   if (plan.status !== 'ready') throw new ConfirmationError('이미 발송했거나 발송 결과 확인이 필요한 예약입니다.', 409);
   if (plan.has_unmatched_products) throw new ConfirmationError('예약 상품 매칭을 먼저 완료해주세요.', 409);
   if (plan.route === 'browser' && fullName === undefined) {
@@ -76,8 +90,8 @@ export async function startConfirmation(env: Env, bookingId: string, fullName?: 
   if (!plan.message) throw new ConfirmationError('네이버 예약 화면에서 전체 이름을 먼저 읽어주세요.', 409);
   const attemptId = crypto.randomUUID();
   const claim = await env.DB.prepare(`INSERT OR IGNORE INTO booking_confirmation_sends
-    (booking_id, attempt_id, route, status, message) VALUES (?1, ?2, ?3, 'sending', ?4)`)
-    .bind(bookingId, attemptId, plan.route, plan.message).run();
+    (booking_id, attempt_id, route, status, message, message_kind) SELECT ?1, ?2, ?3, 'sending', ?4, ?5 WHERE NOT EXISTS (SELECT 1 FROM booking_confirmation_sends WHERE booking_id = ?1 AND (message_kind = 'both' OR ?5 = 'both' OR message_kind = ?5))`)
+    .bind(bookingId, attemptId, plan.route, plan.message, messageKind).run();
   if (!claim.meta.changes) throw new ConfirmationError('이미 발송했거나 발송 결과 확인이 필요한 예약입니다.', 409);
   if (plan.route === 'browser') return { ...plan, attempt_id: attemptId, status: 'sending' };
   try {

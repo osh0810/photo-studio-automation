@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { runConfirmation } from './lib/confirmation-runner.mjs';
 
 const [bookingId, ...args] = process.argv.slice(2);
+const messageKind = args.find(arg => arg.startsWith('--message-kind='))?.slice(15) || 'both';
 const send = args.includes('--send');
 const configPath = args.find(arg => arg.startsWith('--config='))?.slice(9);
 const token = process.env.ADMIN_TOKEN;
@@ -97,7 +98,7 @@ const browser = {
   },
 };
 try {
-  const result = await runConfirmation({ bookingId, api, browser, dryRun: !send });
+  const result = await runConfirmation({ bookingId, api, browser, messageKind, dryRun: !send });
   console.log(JSON.stringify(result, null, 2));
 } catch (error) {
   if (error?.code === 'LOGIN_REQUIRED') {
