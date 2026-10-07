@@ -17,6 +17,8 @@ async function api(method,data) {
   return result;
 }
 let busy=false,stopping=false,loginStatus='unknown';
+process.on('exit',code=>console.error(`${new Date().toISOString()} [runner exit] code=${code}`));
+process.on('uncaughtExceptionMonitor',error=>console.error(`${new Date().toISOString()} [runner fatal] code=${error.code || error.name}`));
 const pairingState=JSON.parse(await readFile('edge-pairing.json','utf8').catch(()=>'{}'));
 const bridge=createExtensionBridge({initialState:pairingState,onRequest:state=>{void writeFile('edge-transport-state.json',JSON.stringify({...state,at:new Date().toISOString()})).catch(()=>{});},onPaired:state=>writeFile('edge-pairing.json',JSON.stringify(state)),onControl:async(action)=>{
   if(action==='diagnose'&&!busy){
@@ -50,7 +52,10 @@ while(!stopping){
       const processed=await processApprovedJob({api,run:(bookingId,messageKind)=>runConfirmation({bookingId,messageKind,api,browser,dryRun:false})});
       if(processed?.loginRequired){loginStatus='login_required';await bridge.pause();await api('POST',{action:'runner_status',status:'login_required'});}
       await writeFile('runner-state.json',JSON.stringify({connected:true,mode:'edge_extension',paused:!bridge.enabled(),loginStatus,lastPoll:new Date().toISOString(),processed}));
-    }catch{await writeFile('runner-state.json',JSON.stringify({connected:false,mode:'edge_extension',lastPoll:new Date().toISOString()}));}
+    }catch(error){
+      console.error(`${new Date().toISOString()} [runner connection error] code=${error.cause?.code || error.code || error.name}`);
+      await writeFile('runner-state.json',JSON.stringify({connected:false,mode:'edge_extension',lastPoll:new Date().toISOString()}));
+    }
     finally{busy=false;}
   }else if(!busy){await writeFile('runner-state.json',JSON.stringify({connected:bridge.connected(),mode:'edge_extension',paused:!bridge.enabled(),loginStatus,lastPoll:new Date().toISOString()}));}
   await new Promise(resolve=>setTimeout(resolve,15000));
