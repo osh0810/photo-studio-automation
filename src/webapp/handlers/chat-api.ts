@@ -351,6 +351,20 @@ system 메시지에 표시된 정보는 **요약/마스킹된 정보**입니다.
 - manual_match_booking_detail: 메일 매칭 실패한 예약 항목을 수동으로 상품에 연결
 - save_frame_address: 고객 배송 주소 자동 감지·저장 (확인 불필요, 즉시 호출)
 - cancel_booking: 예약 취소 처리 (확인 카드 표시 후 작가님 승인 시 실행)
+- create_manual_booking: 전화·문자·현장 신규 예약 저장, Google 캘린더 등록, 고객 안내문/추가 질문 생성
+
+## 전화·문자 신규 예약
+
+- 작가님이 "김정아님 11월24일 오전11시 클래식아기, 클래식가족 예약해줘"처럼 요청하면 create_manual_booking을 사용합니다. register_customer나 record_milestone만 호출해서 끝내지 않습니다.
+- 이름, 날짜, 시간, 상품이 모두 확인되면 즉시 처리합니다. 연락처·결제금액은 선택이며 없으면 임의 생성하지 않습니다.
+- 명시적인 신규 예약 요청은 고객 저장·캘린더 등록·안내문 생성을 포함하는 하나의 작업이므로 각각 따로 승인받지 않습니다.
+- 시간이 없으면 "촬영은 몇 시인가요?"를 묻고 답을 받은 뒤 이전 요청의 이름·날짜·상품과 합쳐 등록합니다. 오전/오후가 모호한 시간도 확인합니다.
+- 연도가 없으면 아래 현재 한국 날짜를 기준으로 다음에 오는 해당 월일을 사용합니다. 사용자가 지정한 연도가 있으면 그대로 사용합니다.
+- list_products로 실제 상품명과 ID를 조회합니다. "클래식아기"는 해당 개별 상품, "클래식가족"은 해당 개별 상품을 찾습니다. 패키지라고만 하거나 개별 상품과 패키지 중 어느 것인지 모호하면 후보를 보여주고 확인합니다. 기존에 없는 상품이나 ID를 만들지 않습니다.
+- 여러 상품은 products 배열에 모두 넣습니다. 고객의 요청 없는 상품 추가/패키지 교체는 금지합니다.
+- 생성 결과의 calendar_registered가 true일 때만 캘린더 등록 완료라고 말합니다. calendar_warning이 있으면 예약은 저장됐지만 캘린더가 실패했다고 안내합니다.
+- 안내문은 confirm_message와 additional_questions 카드로 채팅에 표시됩니다. 고객에게 전송했다고 말하지 않습니다.
+- 재요청 결과 duplicate=true면 기존 예약을 사용했다고 알립니다.
 
 ## 도구 사용 가이드
 
@@ -1929,6 +1943,7 @@ export async function handleAIProcess(request: Request, env: Env): Promise<Respo
 
   // reply_to가 있으면 system 프롬프트에도 참조 블록 추가 (이중 보강)
   let systemPrompt = SYSTEM_PROMPT;
+  systemPrompt += `\n\n현재 한국 날짜: ${new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10)} (Asia/Seoul).`;
   if (replyToContext) {
     systemPrompt +=
       `\n\n## 🚨 최우선 지시: 작가님이 특정 메시지에 직접 답장했습니다\n\n` +

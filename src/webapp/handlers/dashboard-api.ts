@@ -3,9 +3,7 @@
  */
 
 import { requireAuth } from './auth';
-import { createCalendarEventForBooking } from '../lib/calendar-event-builder';
-import { createEvent } from '../lib/calendar-client';
-import { buildConfirmMessage, type BookingDetailWithProduct } from '../lib/confirm-message-builder';
+import { createManualBooking } from '../lib/manual-booking';
 
 interface Env {
   DB: D1Database;
@@ -523,152 +521,14 @@ export async function handleTalkContacts(request: Request, env: Env): Promise<Re
 export async function handleManualBooking(request: Request, env: Env): Promise<Response> {
   const auth = await requireAuth(request, env as any);
   if (auth instanceof Response) return auth;
-
   let body: Record<string, any>;
   try { body = await request.json(); } catch { return Response.json({ error: '잘못된 JSON' }, { status: 400 }); }
-
-  const customer_name = String(body.customer_name || '').trim();
-  const shoot_date = String(body.shoot_date || '').trim();
-  if (!customer_name) return Response.json({ error: 'customer_name 필수' }, { status: 400 });
-  if (!shoot_date) return Response.json({ error: 'shoot_date 필수' }, { status: 400 });
-
   try {
-
-  const now = Date.now();
-  const booking_id = `MANUAL_${now}`;
-  // body.talk_id가 있으면 실제 톡톡 ID 사용, 없으면 임시 ID 생성
-  const talk_id = body.talk_id ? String(body.talk_id).trim() : `MANUAL_${now}_${customer_name}`;
-  const phone = body.phone ? String(body.phone).trim() : null;
-  const consultation_channel = body.consultation_channel ? String(body.consultation_channel).trim() : null;
-  const payment_method = body.payment_method ? String(body.payment_method).trim() : null;
-  const payment_amount = body.payment_amount ? Number(body.payment_amount) : null;
-  const payment_deposit = body.payment_deposit ? Number(body.payment_deposit) : null;
-  // products 배열: [{product_id?, product_name}] 형식
-  const products: Array<{product_id?: string; product_name: string}> =
-    Array.isArray(body.products) && body.products.length > 0
-      ? body.products
-      : body.product_name ? [{ product_id: body.product_id, product_name: body.product_name }] : [];
-  const firstProduct = products[0];
-  // original_memo: 캘린더 고객 메모 섹션용 (선입금 정보 미포함)
-  const original_memo = body.request_note ? String(body.request_note).trim() : null;
-  // request_note (DB 저장용): 선입금/잔액 정보 포함
-  let request_note = original_memo;
-  if (payment_deposit) {
-    const balance = (payment_amount ?? 0) - payment_deposit;
-    const depositNote = `선입금: ${payment_deposit.toLocaleString()}원 / 잔액: ${balance.toLocaleString()}원`;
-    request_note = request_note ? `${request_note}\n${depositNote}` : depositNote;
-  }
-
-  // 1. customers INSERT OR IGNORE (bookings FK 참조 전 먼저 생성)
-  await env.DB.prepare(
-    `INSERT OR IGNORE INTO customers (talk_id, customer_name, phone, consultation_channel, created_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, datetime('now'), datetime('now'))`,
-  ).bind(talk_id, customer_name, phone, consultation_channel).run();
-
-  // 2. bookings INSERT
-  await env.DB.prepare(
-    `INSERT INTO bookings
-       (booking_id, talk_id, customer_name, product_id, product_name, payment_amount,
-        shoot_date, request_note, reservation_date, current_stage, cancelled, created_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, date('now', '+9 hours'), 'S1', 0, datetime('now'), datetime('now'))`,
-  ).bind(booking_id, talk_id, customer_name,
-    firstProduct?.product_id || null, firstProduct?.product_name || null,
-    payment_amount, shoot_date, request_note).run();
-
-  // 3. booking_details INSERT (상품별)
-  for (const p of products) {
-    const pid = p.product_id ? String(p.product_id).trim() : null;
-    const pname = String(p.product_name || '').trim();
-    if (!pname) continue;
-    await env.DB.prepare(
-      `INSERT INTO booking_details (booking_id, product_id, raw_text, match_status, created_at)
-       VALUES (?1, ?2, ?3, ?4, datetime('now'))`,
-    ).bind(booking_id, pid, pname, pid ? 'matched' : 'unmatched').run();
-  }
-
-  // 4. Google Calendar 이벤트 생성 (수동 예약은 메일 없으므로 직접 빌드)
-  let calendarWarning: string | null = null;
-  try {
-    const calEnv = env as any;
-    const startISO = shoot_date.replace(' ', 'T');
-    // 1시간 종료
-    const endMs = new Date(startISO + 'Z').getTime() + 3600000;
-    const endD = new Date(endMs);
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const endISO = `${endD.getUTCFullYear()}-${pad(endD.getUTCMonth()+1)}-${pad(endD.getUTCDate())}T${pad(endD.getUTCHours())}:${pad(endD.getUTCMinutes())}:00`;
-    const startHour = Number(shoot_date.match(/\s(\d{1,2}):/)?.[1] ?? 0);
-    const endHour = (startHour + 1) % 24;
-    const labelName = firstProduct?.product_name || '수동예약';
-    const summary = `${startHour}~${endHour}/${customer_name}(${labelName})`;
-    // 설명 빌드 (기존 buildDescription 패턴 준수)
-    const descLines: string[] = [];
-    // 잔액 최상단
-    if (payment_deposit && payment_amount) {
-      const balance = payment_amount - payment_deposit;
-      descLines.push(`★잔액 ${balance.toLocaleString('ko-KR')}원★`);
-      descLines.push('');
-    }
-    // 고객 메모 섹션 (기존 buildDescription과 동일한 위치)
-    descLines.push('📌 고객 메모');
-    descLines.push('');
-    if (original_memo) descLines.push(`📌 요청사항: ${original_memo}`);
-    descLines.push(`👤 ${customer_name}`);
-    if (labelName) descLines.push(`🎫 ${labelName}`);
-    descLines.push(`🔖 예약번호: ${booking_id}`);
-    if (payment_amount) descLines.push(`💰 결제: ${payment_amount.toLocaleString('ko-KR')}원`);
-    if (payment_method) descLines.push(`💳 결제방식: ${payment_method}`);
-    const eventResource = {
-      summary,
-      description: descLines.join('\n'),
-      start: { dateTime: startISO, timeZone: calEnv.TIMEZONE || 'Asia/Seoul' },
-      end:   { dateTime: endISO,   timeZone: calEnv.TIMEZONE || 'Asia/Seoul' },
-      extendedProperties: { private: { bookingId: booking_id } },
-    };
-    const created = await createEvent(calEnv, eventResource);
-    await env.DB.prepare(
-      `UPDATE bookings SET calendar_event_id = ?1, updated_at = datetime('now') WHERE booking_id = ?2`,
-    ).bind(created.id, booking_id).run();
-    console.log(`[manual-booking] calendar created eventId=${created.id}`);
-  } catch (e: any) {
-    calendarWarning = e?.message || String(e);
-    console.warn(`[manual-booking] calendar 생성 실패 (계속 진행): ${calendarWarning}`);
-  }
-
-  // 5. 확정문자 생성
-  const detailRows = await env.DB.prepare(
-    `SELECT bd.match_status, bd.raw_text, bd.product_id,
-            p.product_name, p.match_keyword,
-            COALESCE(p.retouch_count, 0) AS retouch_count,
-            p.retouch_breakdown,
-            COALESCE(p.frame_count, 0) AS frame_count,
-            p.frame_size, p.extra_note
-     FROM booking_details bd
-     LEFT JOIN products p ON bd.product_id = p.product_id
-     WHERE bd.booking_id = ?1
-     ORDER BY bd.id`,
-  ).bind(booking_id).all<BookingDetailWithProduct>();
-  const details = detailRows.results || [];
-  const confirmMessage = buildConfirmMessage(customer_name, booking_id, shoot_date, details);
-
-  // 6. ai_chat_messages system 메시지 INSERT
-  await env.DB.prepare(
-    `INSERT INTO ai_chat_messages (sender, message, metadata, created_at)
-     VALUES ('system', ?1, ?2, datetime('now'))`,
-  ).bind(
-    confirmMessage,
-    JSON.stringify({ type: 'confirm_message', booking_id, source: 'manual', payment_method }),
-  ).run();
-
-  return Response.json({
-    success: true,
-    booking_id,
-    confirm_message: confirmMessage,
-    ...(calendarWarning ? { calendar_warning: calendarWarning } : {}),
-  });
-  } catch (e: any) {
-    const msg = e?.message || String(e);
-    console.error('[manual-booking] 오류:', msg);
-    return Response.json({ error: msg }, { status: 500 });
+    const result = await createManualBooking(env, body);
+    return Response.json(result, { status: result.error ? 400 : 200 });
+  } catch (error) {
+    console.error('[manual-booking] failed', error);
+    return Response.json({ error: '예약 저장에 실패했습니다. 다시 확인해 주세요.' }, { status: 500 });
   }
 }
 

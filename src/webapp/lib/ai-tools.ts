@@ -12,6 +12,7 @@ import { rescheduleCalendarEvent, renameCustomerInCalendarEvent } from './calend
 import { sendPushNotification } from './push-sender';
 import { getParentFolderId, renameFolderWithPromotion } from './drive-client';
 import { buildConfirmMessage, type BookingDetailWithProduct } from './confirm-message-builder';
+import { createManualBooking } from './manual-booking';
 
 // ─── 타입 ──────────────────────────────────────────────────────────────
 
@@ -89,6 +90,29 @@ const ALL_MILESTONES: MilestoneType[] = [
 // ─── 도구 정의 ─────────────────────────────────────────────────────────
 
 export const TOOLS: ToolDefinition[] = [
+  {
+    name: 'create_manual_booking',
+    description: '전화·문자·현장 예약을 저장하고 Google 캘린더 등록 및 네이버 예약과 같은 고객 안내문/추가 질문을 채팅에 생성합니다. 고객에게 자동 발송하지 않습니다. 이름·촬영 날짜·시간·정확한 상품이 필요합니다. 시간이나 상품을 추측하지 말고 확인하세요. list_products로 실제 상품 ID를 확인하세요. 여러 상품은 products 배열로 전달합니다. 같은 이름·시간·상품의 재요청은 중복을 만들지 않습니다.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_name: { type: 'string', description: '고객 이름' },
+        shoot_date: { type: 'string', description: '한국 시간 YYYY-MM-DD HH:mm:ss. 시간이 없으면 호출하지 말고 질문하세요.' },
+        products: { type: 'array', minItems: 1, items: { type: 'object', properties: {
+          product_id: { type: 'integer', description: 'list_products에서 확인한 실제 상품 ID' },
+          product_name: { type: 'string', description: '실제 등록된 상품명' },
+        }, required: ['product_id', 'product_name'] } },
+        phone: { type: 'string', description: '연락처. 알려주지 않으면 생략' },
+        consultation_channel: { type: 'string', enum: ['phone', 'sms', 'manual'], description: '전화=phone, 문자=sms, 언급 없으면 manual' },
+        request_note: { type: 'string', description: '고객 요청사항' },
+        payment_amount: { type: 'number', description: '고객이 알려준 총 결제금액. 추측하지 말고 없으면 생략' },
+        payment_deposit: { type: 'number' },
+        payment_method: { type: 'string' },
+        talk_id: { type: 'string', description: '확인된 톡톡 ID가 있을 때만 전달' },
+      },
+      required: ['customer_name', 'shoot_date', 'products'],
+    },
+  },
   {
     name: 'record_milestone',
     description:
@@ -2736,6 +2760,8 @@ export async function handleToolUse(
   console.log(`[ai-tool] call ${tool_name} input=${JSON.stringify(tool_input)}`);
   try {
     switch (tool_name) {
+      case 'create_manual_booking':
+        return await createManualBooking(env, tool_input);
       case 'record_milestone':
         return await executeRecordMilestone(env, tool_input);
       case 'search_customers':

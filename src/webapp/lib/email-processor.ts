@@ -85,7 +85,7 @@ async function recordProcessed(
 		`INSERT OR IGNORE INTO processed_emails
 		   (message_id, email_type, booking_id, processing_result, error_message,
 		    parsed_data, raw_subject, raw_received_at)
-		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(message_id) DO UPDATE SET email_type=excluded.email_type, booking_id=excluded.booking_id, processing_result=excluded.processing_result, error_message=excluded.error_message, parsed_data=excluded.parsed_data, processed_at=datetime('now') WHERE processed_emails.processing_result='error'`,
 	)
 		.bind(
 			messageId,
@@ -151,7 +151,7 @@ async function splitAndMatchBookingDetails(
 		if (product) {
 			const ins = await env.DB.prepare(
 				`INSERT INTO booking_details (booking_id, product_id, quantity, match_status, raw_text)
-				 VALUES (?1, ?2, 1, 'matched', ?3)
+				 SELECT ?1, ?2, 1, 'matched', ?3 WHERE NOT EXISTS (SELECT 1 FROM booking_details WHERE booking_id=?1 AND raw_text=?3)
 				 RETURNING id`,
 			)
 				.bind(bookingId, product.product_id, rawText)
@@ -169,7 +169,7 @@ async function splitAndMatchBookingDetails(
 		} else {
 			const ins = await env.DB.prepare(
 				`INSERT INTO booking_details (booking_id, product_id, quantity, match_status, raw_text)
-				 VALUES (?1, NULL, 1, 'unmatched', ?2)
+				 SELECT ?1, NULL, 1, 'unmatched', ?2 WHERE NOT EXISTS (SELECT 1 FROM booking_details WHERE booking_id=?1 AND raw_text=?2)
 				 RETURNING id`,
 			)
 				.bind(bookingId, rawText)
@@ -196,7 +196,7 @@ async function insertSystemMessage(
 	const createdAt = nowSqlite();
 	const result = await env.DB.prepare(
 		`INSERT INTO ai_chat_messages (sender, message, metadata, created_at)
-		 VALUES ('system', ?1, ?2, ?3)
+		 SELECT 'system', ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM ai_chat_messages WHERE sender='system' AND message=?1 AND metadata=?2)
 		 RETURNING id`,
 	)
 		.bind(message, JSON.stringify(args.metadata), createdAt)
@@ -217,7 +217,7 @@ export async function processEmail(
 	try {
 		// 1. 중복 확인
 		const existing = await env.DB.prepare(
-			'SELECT message_id FROM processed_emails WHERE message_id = ?1',
+			"SELECT message_id FROM processed_emails WHERE message_id = ?1 AND processing_result != 'error'",
 		)
 			.bind(messageId)
 			.first();
@@ -293,6 +293,7 @@ export async function processEmail(
 			subject,
 			dateHeader,
 		).catch(() => {});
+		await insertSystemMessage(env, {title:'⚠️ 예약 메일 처리 지연',body:`예약 메일 처리 중 일시적인 오류가 발생했습니다. 다음 확인 주기에 재시도합니다. 메일 ID: ${messageId}`,metadata:{source:'naver_email',type:'email_retry_pending',message_id:messageId}}).catch(() => {});
 		return {
 			message_id: messageId,
 			email_type: 'unknown',
@@ -338,6 +339,22 @@ async function processConfirmEmail(
 		return { message_id: messageId, email_type: 'confirm', result: 'parse_failed' };
 	}
 
+	// Historical recovery must not create actionable booking notifications.
+	const shootTimestamp = Date.parse(parsed.shoot_date.replace(' ', 'T') + '+09:00');
+	if (Number.isFinite(shootTimestamp) && shootTimestamp < Date.now()) {
+		await recordProcessed(env, messageId, 'confirm', parsed.booking_id, 'success', null, parsed, subject, dateHeader);
+		return {message_id: messageId, email_type: 'confirm', result: 'success', booking_id: parsed.booking_id};
+	}
+	// A human may already have recovered a failed mail with a manual booking.
+	const manualRows = await env.DB.prepare("SELECT booking_id, customer_name FROM bookings WHERE booking_id LIKE 'MANUAL_%' AND shoot_date=?1 AND cancelled=0")
+		.bind(parsed.shoot_date).all<{booking_id:string;customer_name:string}>();
+	const namePattern = new RegExp('^' + parsed.customer_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\*/g, '.') + '$');
+	const manual = manualRows.results.find(row => namePattern.test(row.customer_name));
+	if (manual) {
+		await insertSystemMessage(env, {title:'⚠️ 예약 메일 수동 확인 필요',body:`예약번호 ${parsed.booking_id}는 기존 수동 예약 ${manual.booking_id}와 이름·촬영시간이 겹칩니다. 중복 등록하지 않았습니다.`,metadata:{source:'naver_email',type:'manual_booking_conflict',booking_id:parsed.booking_id}});
+		await recordProcessed(env,messageId,'confirm',parsed.booking_id,'parse_failed','MANUAL_BOOKING_CONFLICT',parsed,subject,dateHeader);
+		return {message_id:messageId,email_type:'confirm',result:'parse_failed',booking_id:parsed.booking_id};
+	}
 	const now = nowSqlite();
 	const insertResult = await env.DB.prepare(
 		`INSERT OR IGNORE INTO bookings (
@@ -381,17 +398,7 @@ async function processConfirmEmail(
 		unmatched_texts: unmatchedItems.map((u) => u.raw_text),
 	};
 
-	await recordProcessed(
-		env,
-		messageId,
-		'confirm',
-		parsed.booking_id,
-		'success',
-		null,
-		parsed,
-		subject,
-		dateHeader,
-	);
+
 
 	const shootDateLabel = formatShootDate(parsed.shoot_date);
 
@@ -477,6 +484,18 @@ async function processConfirmEmail(
 			},
 		});
 	}
+
+	await recordProcessed(
+		env,
+		messageId,
+		'confirm',
+		parsed.booking_id,
+		'success',
+		null,
+		parsed,
+		subject,
+		dateHeader,
+	);
 
 	// 5. 푸시 발송 (옵션 A)
 	if (env.ALLOWED_EMAIL) {

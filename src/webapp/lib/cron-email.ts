@@ -25,33 +25,9 @@ export async function handleScheduledEmail(env: Env): Promise<void> {
 	console.log('[cron-email] 시작');
 
 	try {
-		// 1. 마지막 처리된 메일 수신 시각 조회
-		const lastRow = await env.DB.prepare(
-			`SELECT MAX(raw_received_at) AS last_received
-			 FROM processed_emails
-			 WHERE raw_received_at IS NOT NULL`,
-		).first<{ last_received: string | null }>();
-
-		let afterTimestamp: number;
-		if (lastRow?.last_received) {
-			// raw_received_at은 RFC 2822 (Gmail Date 헤더). Date 파서가 RFC 2822 지원.
-			const parsed = new Date(lastRow.last_received).getTime();
-			if (isNaN(parsed)) {
-				console.warn(
-					`[cron-email] last_received 파싱 실패: "${lastRow.last_received}" — 24h fallback`,
-				);
-				afterTimestamp = Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
-			} else {
-				afterTimestamp = Math.floor(parsed / 1000);
-			}
-		} else {
-			// 첫 실행: 24시간 이전부터
-			afterTimestamp = Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
-		}
-
-		console.log(
-			`[cron-email] after timestamp: ${afterTimestamp} (${new Date(afterTimestamp * 1000).toISOString()})`,
-		);
+		// Overlap protects against delayed mail and failures before an error can be recorded.
+		const afterTimestamp = Math.floor((Date.now() - 48 * 60 * 60 * 1000) / 1000);
+		const retryRows = await env.DB.prepare("SELECT message_id FROM processed_emails WHERE processing_result='error' ORDER BY processed_at LIMIT 50").all<{message_id:string}>();
 
 		// 2. Access token
 		const accessToken = await getValidAccessToken(env);
@@ -64,9 +40,14 @@ export async function handleScheduledEmail(env: Env): Promise<void> {
 
 		// 3. Gmail 검색
 		const query = `from:naverbooking_noreply@navercorp.com after:${afterTimestamp}`;
-		const listResult = await listMessages(accessToken, query, 50);
-
-		const messageIds = (listResult.messages || []).map((m) => m.id);
+		const found: string[] = [];
+		let pageToken: string | undefined;
+		do {
+			const page = await listMessages(accessToken, query, 50, pageToken);
+			found.push(...(page.messages || []).map(m => m.id));
+			pageToken = page.nextPageToken;
+		} while (pageToken);
+		const messageIds = [...new Set([...retryRows.results.map(r => r.message_id), ...found])];
 		console.log(`[cron-email] 발견된 메일 수: ${messageIds.length}`);
 
 		if (messageIds.length === 0) {
