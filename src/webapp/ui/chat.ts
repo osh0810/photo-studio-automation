@@ -2797,6 +2797,10 @@ export function renderChatPage(userEmail: string): string {
       row.appendChild(button);
       card.appendChild(row);
       card.appendChild(status);
+      const closureStatus = el('div', { class: 'confirm-result' });
+      const closureRetry = el('button', { type: 'button' }, '시간 마감만 재시도');
+      closureRetry.style.display = 'none';
+      if (messageKind !== 'additional') { card.appendChild(closureStatus); card.appendChild(closureRetry); }
       const path = '/api/bookings/' + encodeURIComponent(bookingId) + '/confirmation?message_kind=' + messageKind;
       const labels = { queued: '승인 완료 · PC 실행기 연결 대기', running: '발송 처리 중 · 오래 지속되면 대화창을 확인해주세요', sending: '발송 처리 중', sent: title + ' 발송 완료', already_sent: title + ' 기존 발송 확인 · 중복 발송하지 않습니다', unavailable: '추가 질문이 설정되어 있지 않습니다', uncertain: '발송 결과 확인 필요 · 톡톡 대화창을 확인해주세요' };
       let timer;
@@ -2807,9 +2811,19 @@ export function renderChatPage(userEmail: string): string {
           button.textContent = title + ' 발송';
           button.disabled = plan.status !== 'ready' || plan.has_unmatched_products;
           status.textContent = plan.status === 'queued' && plan.runner_login_required ? '승인 완료 · 네이버 재로그인 대기' : labels[plan.status] || (plan.has_unmatched_products ? '예약 상품 매칭을 먼저 완료해주세요' : title + '만 발송합니다');
-          if (['queued', 'running', 'sending'].includes(plan.status)) timer = setTimeout(refresh, 15000);
+          const closure = messageKind !== 'additional' ? plan.slot_closure : null;
+          const closureLabels = {queued:'네이버 예약 시간 마감 대기 · PC 연결 필요',running:'네이버 예약 시간 마감 중',closed:'네이버 모든 상품의 같은 시작 시간 마감 완료',failed:'네이버 예약 마감 확인 필요',login_required:'시간 마감 대기 · 네이버 재로그인 필요'};
+          closureStatus.textContent = closure ? closureLabels[closure.status] || '' : '';
+          closureRetry.style.display = closure && ['failed','login_required'].includes(closure.status) ? '' : 'none';
+          if (['queued', 'running', 'sending'].includes(plan.status) || closure && (['queued','running'].includes(closure.status) || ['failed','login_required'].includes(closure.status) && closure.attempts < 3)) timer = setTimeout(refresh, 15000);
         } catch (e) { status.textContent = e.message || '상태 확인 실패'; }
       }
+      closureRetry.addEventListener('click', async () => {
+        closureRetry.disabled = true;
+        try { await api('POST', path, {action:'retry_slot_closure'}); await refresh(); }
+        catch (e) { closureStatus.textContent = e.message || '시간 마감 재시도 실패'; }
+        finally { closureRetry.disabled = false; }
+      });
       button.addEventListener('click', async () => {
         button.disabled = true;
         try {
@@ -2819,6 +2833,7 @@ export function renderChatPage(userEmail: string): string {
           const panel = el('div', { class: 'modal-panel' });
           panel.style.cssText = 'background:var(--bg);padding:24px;border-radius:12px;max-width:640px;width:90%;max-height:85vh;overflow:auto';
           panel.appendChild(el('h3', {}, '예약 ' + bookingId + ' 발송 확인'));
+          if (messageKind !== 'additional') panel.appendChild(el('p', {}, '안내 발송과 함께 네이버 간단예약관리에서 모든 상품의 같은 날짜·시작 시간을 마감합니다. 시간 마감에는 PC 실행기와 네이버 로그인이 필요합니다.'));
           if (plan.needs_full_name) panel.appendChild(el('p', {}, '네이버 예약 화면에서 전체 이름을 읽어 발송합니다. PC 실행기와 네이버 로그인이 필요합니다.'));
           const preview = el('pre', {}, plan.preview_message);
           preview.style.cssText = 'white-space:pre-wrap;font:inherit;line-height:1.6';

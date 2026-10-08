@@ -1,4 +1,5 @@
 import {pageAction,captureConversation} from './page-actions.mjs';
+import {slotAction} from './slot-actions.mjs';
 const local='http://127.0.0.1:18766';
 let running=false;
 async function request(path,body){
@@ -24,6 +25,15 @@ async function ready(tabId){
 async function execute(command){
   const {reservationTab,conversationTab}=await chrome.storage.session.get(['reservationTab','conversationTab']);
   const {operation,args}=command;
+  if(operation==='close_slots'){
+    if(!/^\d{4}-\d{2}-\d{2} \d{2}:00(?::00)?$/.test(args.shootDate||''))throw new Error('UNSUPPORTED_SLOT_TIME');
+    const tab=await chrome.tabs.create({url:'https://partner.booking.naver.com/bizes/745146/simple-management',active:false});
+    try {
+      await ready(tab.id);await page(tab.id,slotAction,['close_slots',args]);
+      await chrome.tabs.reload(tab.id);await ready(tab.id);
+      return await page(tab.id,slotAction,['verify_slots',args]);
+    }finally{await chrome.tabs.remove(tab.id).catch(()=>{});}
+  }
   if(operation==='reservation'){
     if(!/^\d{10}$/.test(args.bookingId))throw new Error('WRONG_RESERVATION');
     const tab=await chrome.tabs.create({url:`https://partner.booking.naver.com/bizes/745146/booking-list-view/bookings/${args.bookingId}`,active:false});

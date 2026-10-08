@@ -1,6 +1,7 @@
 import { requireAuth } from './auth';
 import { ConfirmationError, validateBookingId, validateMessageKind } from '../lib/booking-confirmation';
 import { approveConfirmation, confirmationState } from '../lib/booking-confirmation-jobs';
+import {retrySlotClosure} from '../lib/booking-slot-closures';
 
 interface Env { DB: D1Database; NAVER_TALK_TOKEN: string; [key: string]: unknown; }
 export async function handleAssistantConfirmation(request: Request, env: Env, id: string) {
@@ -16,6 +17,7 @@ export async function handleAssistantConfirmation(request: Request, env: Env, id
       let body: any = {};
       try { const text = await request.text(); if (text) body = JSON.parse(text); } catch { throw new ConfirmationError('올바른 JSON이 필요합니다.'); }
       if (!body || typeof body !== 'object') throw new ConfirmationError('JSON 객체가 필요합니다.');
+      if(body.action==='retry_slot_closure')return json(await retrySlotClosure(env,bookingId));
       if (!['confirmation', 'additional'].includes(body.message_kind)) throw new ConfirmationError('비서 화면을 새로고침한 뒤 메시지별 발송 버튼을 눌러주세요.');
       return json(await approveConfirmation(env, bookingId, auth.userEmail, validateMessageKind(body.message_kind)));
     }

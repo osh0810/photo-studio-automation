@@ -1,4 +1,5 @@
 import { ConfirmationError, prepareConfirmation, startConfirmation, type MessageKind } from './booking-confirmation';
+import {slotClosureInsert} from './booking-slot-closures';
 
 interface Env { DB: D1Database; NAVER_TALK_TOKEN: string; }
 export async function confirmationState(env: Env, bookingId: string, messageKind: MessageKind = 'both') {
@@ -6,16 +7,18 @@ export async function confirmationState(env: Env, bookingId: string, messageKind
   const job = await env.DB.prepare("SELECT status, error, updated_at FROM booking_confirmation_jobs WHERE booking_id = ?1 AND (message_kind = ?2 OR message_kind = 'both' OR ?2 = 'both') LIMIT 1")
     .bind(bookingId, messageKind).first<{ status: string; error: string | null; updated_at: string }>();
   const runner = await env.DB.prepare('SELECT status FROM booking_runner_status WHERE id = 1').first<{ status: string }>();
-  return { ...plan, job, runner_login_required: runner?.status === 'login_required', status: plan.status !== 'ready' ? plan.status : job?.status ?? 'ready' };
+  const slot_closure = await env.DB.prepare('SELECT status,shoot_date,error,attempts FROM booking_slot_closures WHERE booking_id=?1').bind(bookingId).first();
+  return { ...plan, job, slot_closure, runner_login_required: runner?.status === 'login_required', status: plan.status !== 'ready' ? plan.status : job?.status ?? 'ready' };
 }
 
 export async function approveConfirmation(env: Env, bookingId: string, userEmail: string, messageKind: MessageKind = 'both') {
   const plan = await confirmationState(env, bookingId, messageKind);
   if (plan.status !== 'ready') throw new ConfirmationError('이미 승인했거나 발송한 예약입니다. 상태를 확인해주세요.', 409);
   if (plan.has_unmatched_products) throw new ConfirmationError('예약 상품 매칭을 먼저 완료해주세요.', 409);
-  const inserted = await env.DB.prepare(`INSERT OR IGNORE INTO booking_confirmation_jobs
+  const insertion = env.DB.prepare(`INSERT OR IGNORE INTO booking_confirmation_jobs
     (booking_id, approved_by, status, message_kind) SELECT ?1, ?2, ?3, ?4 WHERE NOT EXISTS (SELECT 1 FROM booking_confirmation_jobs WHERE booking_id = ?1 AND (message_kind = 'both' OR ?4 = 'both' OR message_kind = ?4))`)
-    .bind(bookingId, userEmail, plan.route === 'api' ? 'running' : 'queued', messageKind).run();
+    .bind(bookingId, userEmail, plan.route === 'api' ? 'running' : 'queued', messageKind);
+  const [inserted] = await env.DB.batch(messageKind==='additional' ? [insertion] : [insertion, slotClosureInsert(env,bookingId)]);
   if (!inserted.meta.changes) throw new ConfirmationError('이미 승인한 예약입니다.', 409);
   if (plan.route === 'browser') return { status: 'queued', route: 'browser', message_kind: messageKind };
   try {

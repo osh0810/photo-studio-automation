@@ -3,6 +3,7 @@ import {spawn} from 'node:child_process';
 import { createExtensionBridge } from './lib/extension-bridge.mjs';
 import { processApprovedJob } from './lib/approval-worker.mjs';
 import { runConfirmation } from './lib/confirmation-runner.mjs';
+import {processSlotClosure} from './lib/slot-closure-worker.mjs';
 const base = process.env.STUDIO_API_BASE;
 const token = process.env.ADMIN_TOKEN;
 if (!base || !token) throw new Error('기존 실행기 API 설정이 필요합니다.');
@@ -51,6 +52,10 @@ while(!stopping){
     try {
       const processed=await processApprovedJob({api,run:(bookingId,messageKind)=>runConfirmation({bookingId,messageKind,api,browser,dryRun:false})});
       if(processed?.loginRequired){loginStatus='login_required';await bridge.pause();await api('POST',{action:'runner_status',status:'login_required'});}
+      if(!processed?.loginRequired){
+        const closure=await processSlotClosure({api,close:shootDate=>bridge.command('close_slots',{shootDate},180000)});
+        if(closure?.loginRequired){loginStatus='login_required';await bridge.pause();await api('POST',{action:'runner_status',status:'login_required'});}
+      }
       await writeFile('runner-state.json',JSON.stringify({connected:true,mode:'edge_extension',paused:!bridge.enabled(),loginStatus,lastPoll:new Date().toISOString(),processed}));
     }catch(error){
       console.error(`${new Date().toISOString()} [runner connection error] code=${error.cause?.code || error.code || error.name}`);

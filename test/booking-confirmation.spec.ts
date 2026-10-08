@@ -8,6 +8,7 @@ import { approveConfirmation, claimConfirmationJob, completeConfirmationJob, con
 import { reportRunnerStatus } from '../src/webapp/lib/booking-runner-status';
 import { handleAssistantConfirmation } from '../src/webapp/handlers/booking-confirmation-api';
 import { createSession } from '../src/webapp/lib/session';
+import {claimSlotClosure,finishSlotClosure,retrySlotClosure} from '../src/webapp/lib/booking-slot-closures';
 
 vi.mock('../src/services/talk', () => ({ sendNaverTalkMessage: vi.fn() }));
 vi.mock('../src/webapp/lib/calendar-event-builder', () => ({ renameCustomerInCalendarEvent: vi.fn(async () => undefined) }));
@@ -16,6 +17,7 @@ beforeEach(async () => {
   vi.mocked(sendNaverTalkMessage).mockReset();
   await env.DB.prepare("UPDATE booking_runner_status SET status = 'unknown' WHERE id = 1").run();
   await env.DB.prepare('DELETE FROM booking_confirmation_jobs').run();
+  await env.DB.prepare('DELETE FROM booking_slot_closures').run();
   await env.DB.prepare('DELETE FROM talk_messages').run();
   await env.DB.prepare('DELETE FROM booking_details').run();
   await env.DB.prepare('DELETE FROM booking_confirmation_sends').run();
@@ -35,6 +37,33 @@ async function booking(id = '1234567890', talkId: string | null = null, cancelle
     SELECT ?1, product_id, 1, 'matched', '클래식아기사진' FROM products WHERE product_code = 'BABY_TEST'`).bind(id).run();
 }
 const runtime = () => ({ ...env, ADMIN_TOKEN: 'test-admin', NAVER_TALK_TOKEN: 'test-talk' });
+describe('Reservation slot closing',()=>{
+ it('queues one closure even when the message is sent directly through the API',async()=>{
+  await booking('1234567890','saved-id');vi.mocked(sendNaverTalkMessage).mockResolvedValue({success:true,raw:{},durMs:0});
+  await approveConfirmation(runtime(),'1234567890','owner@test','confirmation');
+  expect((await confirmationState(runtime(),'1234567890','confirmation')).slot_closure).toMatchObject({status:'queued',shoot_date:'2026-11-01 10:00:00'});
+  expect(vi.mocked(sendNaverTalkMessage)).toHaveBeenCalledTimes(1);
+  const job=(await claimSlotClosure(runtime()))!;expect(job.booking_id).toBe('1234567890');expect(await claimSlotClosure(runtime())).toBeNull();
+  await finishSlotClosure(runtime(),job.booking_id,job.claim_id,'closed',{verified:true,total:8});
+  expect((await confirmationState(runtime(),'1234567890','confirmation')).slot_closure).toMatchObject({status:'closed'});
+ });
+ it('additional questions alone never create a closing job',async()=>{
+  await booking();await approveConfirmation(runtime(),'1234567890','owner@test','additional');
+  expect(await claimSlotClosure(runtime())).toBeNull();
+ });
+ it('cancelled or rescheduled bookings cannot close a stale time',async()=>{
+  await booking();await approveConfirmation(runtime(),'1234567890','owner@test','confirmation');
+  await env.DB.prepare("UPDATE bookings SET shoot_date='2026-11-01 11:00:00' WHERE booking_id='1234567890'").run();
+  expect(await claimSlotClosure(runtime())).toBeNull();
+ });
+ it('requires verified completion and allows closure-only retry without resending',async()=>{
+  await booking();await approveConfirmation(runtime(),'1234567890','owner@test','confirmation');const job=(await claimSlotClosure(runtime()))!;
+  await expect(finishSlotClosure(runtime(),job.booking_id,job.claim_id,'closed',{total:8})).rejects.toThrow('검증');
+  await finishSlotClosure(runtime(),job.booking_id,job.claim_id,'failed',null);
+  await retrySlotClosure(runtime(),job.booking_id);expect(await claimSlotClosure(runtime())).not.toBeNull();
+  expect(vi.mocked(sendNaverTalkMessage)).not.toHaveBeenCalled();
+ });
+});
 describe('Independent message delivery', () => {
   it('approves and sends exactly one message; the other remains available', async () => {
     await booking('1234567891', 'saved-id');

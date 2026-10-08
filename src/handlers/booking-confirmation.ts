@@ -1,4 +1,5 @@
 import type { Env } from '../types';
+import {claimSlotClosure,finishSlotClosure} from '../webapp/lib/booking-slot-closures';
 import { claimConfirmationJob, completeConfirmationJob, deferConfirmationForLogin } from '../webapp/lib/booking-confirmation-jobs';
 import { reportRunnerStatus } from '../webapp/lib/booking-runner-status';
 import { ConfirmationError, validateBookingId, validateMessageKind, prepareConfirmation, startConfirmation, finishConfirmation } from '../webapp/lib/booking-confirmation';
@@ -19,7 +20,13 @@ export async function handleBookingConfirmation(request: Request, env: Env): Pro
     if (!body || typeof body !== 'object') throw new ConfirmationError('JSON 객체가 필요합니다.');
     if (body.action === 'runner_status') return json(await reportRunnerStatus(env, body.status));
     if (body.action === 'claim_job') return json({ job: await claimConfirmationJob(env) });
+    if (body.action === 'claim_slot_closure') return json({job:await claimSlotClosure(env)});
     const bookingId = validateBookingId(body.booking_id);
+    if (body.action === 'complete_slot_closure') {
+      if(typeof body.claim_id!=='string')throw new ConfirmationError('claim_id가 필요합니다.');
+      await finishSlotClosure(env,bookingId,body.claim_id,body.status,body.result);
+      return json({success:true});
+    }
     if (body.action === 'defer_login') {
       if (typeof body.claim_id !== 'string') throw new ConfirmationError('claim_id가 필요합니다.');
       await deferConfirmationForLogin(env, bookingId, body.claim_id);
